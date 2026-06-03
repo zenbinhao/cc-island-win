@@ -11,6 +11,7 @@
 - `.gitignore`：新增忽略 `*.pdb`（.NET 调试符号）与 `Microsoft.Web.WebView2.*.xml`（WebView2 IntelliSense 文档，约 700KB），二者运行时均不需要。
 
 ### Changed
+- `CLAUDE.md`：新增「WSL2 一样能驱动」说明并澄清「常用命令」措辞——`SUPPORTED_PLATFORMS=win32` 只约束 bridge/companion 须由 Windows node 运行，不限制 Claude Code 的宿主；WSL2 里把 hook 的 `node` 换成 `node.exe`（Windows node，interop 直接透传 stdin）即可驱动灵动岛。背景：实测从 WSL 跑 `echo JSON | node.exe bridge.mjs hook` 成功开窗、状态实时更新、中文/emoji stdin 无损、终端经 `WT_SESSION` 识别为 windows-terminal；此前「仅支持 Windows」的措辞反复被误读为「Claude Code 必须 Windows 原生」。
 - `README.md`：补齐与当前实现的差异——新增 `/island theme <dark|pink|auto>` 命令、`screen all` 选项、聚焦跳转说明；架构图 hook 列表补全为 7 个（增加 `StopFailure`、`PermissionRequest`）；新增「更新日志」指向。
 - 初始化 Git 仓库，推送至 `github.com/zenbinhao/cc-island-win`。
 

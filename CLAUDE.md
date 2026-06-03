@@ -10,7 +10,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 常用命令
 
-脚本都在 `island/src/`，用 Node.js 运行（Claude Code 自带 node）。**仅在 Windows 上能完整运行**——会涉及命名管道与原生 exe。
+脚本都在 `island/src/`，用 Node.js 运行（Claude Code 自带 node）。**bridge / companion 必须由 Windows node 运行**——会涉及命名管道与原生 exe。但 Claude Code 的宿主既可是 Windows 原生终端，**也可是 WSL2**（此时 hook 改调 `node.exe`，详见架构小节「WSL2 一样能驱动」一条）。
 
 ```bash
 # 运行测试套件：向 bridge 灌入模拟的 hook stdin JSON，验证事件分派、
@@ -50,6 +50,7 @@ island-host-win.exe  C# WinForms + WebView2 原生窗口   (hosts/windows/island
 - **companion 单例。** 命名管道地址被占用（EADDRINUSE）时，后启动者直接退出，保证全局只有一个守护进程。
 - **窗口聚焦由 C# 主机做。** 点胶囊行左侧 ↗ 按钮 → WebView 发 WebMessage → C# 主机在 UI 线程调 `SetForegroundWindow`（隐藏的后台 node 进程调用会失败，所以必须在主机侧做）。companion 仅对 Windows Terminal / WezTerm 额外切 tab / pane。
 - **平台分支集中在 platform.mjs。** 屏幕几何、窗口定位、屏幕数量全走 PowerShell；其他文件不直接判断 `process.platform`。`SUPPORTED_PLATFORMS` 仅 `win32`。
+- **灵动岛只限 Windows *桌面*，不限 Claude Code 的宿主——WSL2 一样能驱动。** 上面的 `SUPPORTED_PLATFORMS` 仅 `win32` 约束的是 **bridge / companion 必须由 Windows node 运行**，不是要求 Claude Code 跑在 Windows 原生终端。在 WSL2 里，把 hook 命令里的 `node` 换成 `node.exe`（Windows node，WSL interop 可直接调用并原样透传 stdin），bridge 就跑在 Windows 侧，后续链路与纯 Windows 完全一致。已实测：从 WSL 跑 `echo JSON | node.exe <仓库>/island/src/bridge.mjs hook` 能正常开窗、状态实时更新、中文 / emoji prompt 无损，且因 `WT_SESSION` 经 WSLENV 透传，终端仍被识别为 `windows-terminal`。代价：每个 hook 多一次 interop 冷启动开销。**别再断言「WSL 下做不了」。**
 - **发往 C# 主机的 stdin 只传 ASCII。** `open-fixed.mjs` 把 JSON 里的非 ASCII 字符转成 `\uXXXX`，规避 Windows 管道编码导致的 Unicode 损坏。
 - **预编译 exe 有意提交进仓库**（`island/src/hosts/windows/`），让用户免装 .NET SDK 即可运行；`build.mjs` 只在 exe 丢失时用到。`.pdb` 与 WebView2 `*.xml` 文档不入库（见 `.gitignore`）。
 
