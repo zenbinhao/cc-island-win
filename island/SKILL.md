@@ -61,6 +61,18 @@ companion.mjs  (常驻守护进程，永不自动退出)
 
 预编译 exe（`src/hosts/windows/island-host-win.exe`）已内置在 skill 目录中，**绝大多数用户无需安装任何编译工具**，如未找到，请重新核实目录是否正确，路径或转义是否正确解析，只需 .NET Desktop Runtime 8.0 即可运行。
 
+### Claude Code 运行在 WSL2 时
+
+灵动岛 UI 只在 Windows 桌面渲染，但 Claude Code 的宿主可以是 WSL2。此时 **hook 命令必须用 Windows 的 node（`node.exe`），不能用 WSL 的 Linux node**——后者连不上 Windows 命名管道、`platform.mjs` 也只认 `win32`。
+
+配置 hooks 时（WSL 的 `~/.claude/settings.json`，如 `/root/.claude/settings.json`），把命令里的 `node` 换成 `node.exe`，bridge 路径用 Windows 形式 `C:/…`：
+
+```json
+"SessionStart": [{"matcher":"","hooks":[{"type":"command","command":"node.exe C:/Users/<你>/.../island/src/bridge.mjs on"}]}]
+```
+
+其余 6 个 hook 同理改用 `node.exe ... bridge.mjs hook`。`node.exe` 在 WSL 默认 PATH 内可直接调用，interop 会把 hook 的 stdin JSON 原样透传到 Windows node（含中文 / emoji，已实测无损；终端经 `WT_SESSION` 仍识别为 `windows-terminal`）。代价：每个 hook 多一次 interop 冷启动（约 1~2 秒）。状态文件统一落在 Windows 侧 `C:\Users\<你>\.claude`，与 Windows 原生会话共享、按 session 堆叠不串。
+
 ---
 
 ## /island 命令
