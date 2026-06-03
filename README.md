@@ -36,7 +36,7 @@
 
 Agent 会自动完成环境检查、依赖安装、编译和 hooks 配置。
 
-> **在 WSL2 里运行 Claude Code？同样可用。** 灵动岛窗口只在 **Windows 桌面**渲染，但驱动它的 Claude Code 既可跑在 Windows 原生终端、也可跑在 **WSL2**。区别只在 hooks 命令调用哪个 node：Windows 原生用 `node`；WSL2 则换成 `node.exe`（Windows 的 node，WSL interop 可直接调用并原样透传 stdin），bridge 路径用 `C:/…` 形式，例如 `node.exe C:/Users/<你>/.../island/src/bridge.mjs hook`。代价：每个 hook 多一次 interop 冷启动开销；其余行为（多会话堆叠、聚焦跳转、状态更新）与纯 Windows 一致。
+> **在 WSL2 里运行 Claude Code？同样可用。** 灵动岛窗口只在 **Windows 桌面**渲染，但驱动它的 Claude Code 既可跑在 Windows 原生终端、也可跑在 **WSL2**。区别只在 hooks 命令调用哪个 node：Windows 原生用 `node`；WSL2 则换成 `node.exe`（Windows 的 node，WSL interop 可直接调用并原样透传 stdin），bridge 路径用 `C:/…` 形式，例如 `node.exe C:/Users/<你>/.../island/src/bridge.mjs hook`。代价：每个 hook 多一次 interop 冷启动开销；其余行为（多会话堆叠、状态更新）与纯 Windows 一致。
 
 ## 依赖
 
@@ -84,7 +84,6 @@ companion.mjs  (常驻守护进程)
 - **永久常驻**: companion 不会自动退出，需手动 `/island kill`
 - **重启恢复**: 电脑重启后下次打开 Claude Code 自动恢复
 - **主题切换**: 支持 `dark` / `pink` / `auto` 三种主题（`/island theme`），偏好持久化到 `~/.claude/claude-island.json`
-- **聚焦跳转**: 鼠标悬停胶囊，每行左侧出现 ↗ 按钮，点击聚焦到对应会话的终端窗口（支持 WezTerm、Windows Terminal、PowerShell、CMD、Git Bash、VSCode 终端）
 
 ## 故障排查
 

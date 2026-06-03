@@ -118,8 +118,6 @@ log("info", `windows=${screenGeos.length}`);
 // ── Open one window per screen ─────────────────────────────────────────
 // currentRows: id → js string — used to replay state into newly-ready windows
 const currentRows = new Map();
-// sessionTerminal: sessionId → { termType, termId, termPpid } — for focus-button feature
-const sessionTerminal = new Map();
 const wins = [];
 
 const MAX_PENDING = 200;
@@ -172,13 +170,6 @@ for (const geo of screenGeos) {
   });
   w.on("error", (e) => {
     log("error", `window error at (${x},${y}): ${e?.message || e}`);
-  });
-  w.on("message", (data) => {
-    log("debug", `window-msg: ${JSON.stringify(data)}`);
-    if (data?.type === "focus-session" && typeof data.id === "string") {
-      log("info", `focus-session received id=${data.id}`);
-      focusTerminal(data.id);
-    }
   });
 }
 
@@ -244,21 +235,11 @@ const server = createServer((sock) => {
 
     if (msg.type === "update") {
       if (!msg.id || !VALID_STATUS.has(msg.status)) return;
-      log("info", `update id=${msg.id} status=${msg.status} project=${msg.project||''} termType=${msg.termType||''} tabIndex=${msg.tabIndex} prompt="${(msg.prompt||'').substring(0,40)}"`);
+      log("info", `update id=${msg.id} status=${msg.status} project=${msg.project||''} prompt="${(msg.prompt||'').substring(0,40)}"`);
       rowLastUpdate.set(msg.id, Date.now());
       clearDoneTimer(msg.id);
       activeRowIds.add(msg.id);
       syncHeight();
-      // Store terminal info for focus-button feature
-      if (msg.termType) {
-        sessionTerminal.set(msg.id, {
-          termType: msg.termType,
-          termId: msg.termId || null,
-          termPpid: msg.termPpid || null,
-          termPid: msg.termPid || null,
-          tabIndex: typeof msg.tabIndex === "number" ? msg.tabIndex : -1,
-        });
-      }
       const js = 'window.island.upsertRow(' + JSON.stringify(msg.id) + ',' + JSON.stringify(msg) + ')';
       currentRows.set(msg.id, js);
       send(js);
@@ -346,50 +327,6 @@ server.on("error", (err) => {
 server.listen(SOCK, () => {
   log("info", `listening on ${SOCK}`);
 });
-
-// ── Terminal focus (focus-button feature) ──────────────────────────────
-//
-// Window activation is handled by the C# host (island-host-win.exe).
-// It intercepts the focus-session WebMessage (from the WebView focus button
-// click) and calls ActivateWindow(ppid) on the UI thread — where
-// GetForegroundWindow / AttachThreadInput / SetForegroundWindow all work
-// correctly.  Spawning a hidden PowerShell process for SetForegroundWindow
-// is fundamentally broken because GetForegroundWindow() returns 0 from
-// hidden/background processes.
-function focusTerminal(sessionId) {
-  const term = sessionTerminal.get(sessionId);
-  if (!term) {
-    log("warn", `focusTerminal: no terminal info for session ${sessionId}`);
-    return;
-  }
-  log("info", `focusTerminal: session=${sessionId} type=${term.termType} tabIndex=${term.tabIndex} (delegated to C# host)`);
-
-  // Windows Terminal: switch to the correct tab.
-  // NOTE: C# host's ActivateWindow runs synchronously before this handler
-  // (island-host.cs WebMessageReceived → ActivateWindow), so the WT window
-  // is already in the foreground when this tab switch executes.
-  if (term.termType === "windows-terminal" && term.tabIndex >= 0) {
-    try {
-      execSync(`wt -w 0 focus-tab -t ${term.tabIndex}`, {
-        timeout: 3000, stdio: "ignore", windowsHide: true,
-      });
-    } catch (e) {
-      log("warn", `wt focus-tab failed: ${e.message}`);
-    }
-  }
-
-  // WezTerm: activate the specific pane via CLI.
-  // Window activation (restore + foreground) is handled by the C# host.
-  if (term.termType === "wezterm" && term.termId) {
-    try {
-      execSync(`wezterm cli activate-pane --pane-id ${term.termId}`, {
-        timeout: 3000, stdio: "ignore", windowsHide: true,
-      });
-    } catch (e) {
-      log("warn", `wezterm activate-pane failed: ${e.message}`);
-    }
-  }
-}
 
 // ── Cleanup ────────────────────────────────────────────────────────────
 let cleaned = false;

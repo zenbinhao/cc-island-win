@@ -237,37 +237,13 @@ body.theme-pink .row[data-status="done"] .braille {
   }
 }
 
-/* ── Row wrapper (button lives here, outside the clipping row) ──── */
+/* ── Row wrapper (carries per-row separator border + bottom radius) ──── */
 .row-wrap {
   position: relative;
   width: calc(460px * var(--scale));
 }
 
 #stack { opacity: 1; }
-body.island-hover .row { opacity: 0.06; transition: opacity 200ms ease; }
-
-/* ── Focus button ────────────────────────────────────────────────── */
-.focus-btn {
-  position: absolute;
-  left: calc(-46px * var(--scale));
-  top: calc(5px * var(--scale));
-  width: calc(24px * var(--scale));
-  height: calc(24px * var(--scale));
-  border-radius: 50%;
-  background: rgba(30,30,30,0.55);
-  border: 1px solid rgba(255,255,255,0.45); box-shadow: 0 1px 4px rgba(0,0,0,0.35);
-  opacity: 0; transition: opacity 180ms ease, background 150ms ease, box-shadow 150ms ease;
-  cursor: pointer;
-  font-size: calc(11px * var(--scale)); color: rgba(255,255,255,0.9); font-weight: 600;
-  display: flex; align-items: center; justify-content: center;
-  pointer-events: none;
-  z-index: 10;
-}
-body.island-hover .focus-btn { opacity: 1; pointer-events: auto; }
-.focus-btn:hover { background: rgba(50,50,50,0.75); border-color: rgba(255,255,255,0.7); box-shadow: 0 2px 8px rgba(0,0,0,0.5); }
-
-body.theme-pink .focus-btn { background: rgba(50,18,30,0.55); border-color: rgba(255,200,210,0.5); color: rgba(255,220,230,0.92); box-shadow: 0 1px 4px rgba(0,0,0,0.3); }
-body.theme-pink .focus-btn:hover { background: rgba(70,25,40,0.75); border-color: rgba(255,200,210,0.75); box-shadow: 0 2px 8px rgba(0,0,0,0.45); }
 </style>
 </head>
 <body>
@@ -393,16 +369,10 @@ body.theme-pink .focus-btn:hover { background: rgba(70,25,40,0.75); border-color
     var existing = rows[id];
     if (existing && !existing.removing) {
       existing.data = Object.assign({}, existing.data, data);
-      // Update ppid on existing button — prefer termPid (terminal PID) over
-      // termPpid (bridge parent PID, which may be a short-lived hook shell).
-      var eb = existing.wrap.querySelector('.focus-btn');
-      if (eb && (data.termPid != null || data.termPpid != null)) eb.setAttribute('data-ppid', data.termPid || data.termPpid || '');
       renderRowContent(existing); startTickers(); return;
     }
     var wrap = document.createElement('div'); wrap.className = 'row-wrap';
-    var btn = document.createElement('button'); btn.className = 'focus-btn'; btn.setAttribute('data-id', id); btn.setAttribute('data-ppid', data.termPid || data.termPpid || ''); btn.textContent = '↗';
     var el = document.createElement('div'); el.className = 'row'; el.setAttribute('data-id', id);
-    wrap.appendChild(btn);
     wrap.appendChild(el);
     var row = { id: id, data: Object.assign({}, data), el: el, wrap: wrap, removing: false };
     if (!row.data.startedAt) row.data.startedAt = Date.now();
@@ -441,19 +411,6 @@ body.theme-pink .focus-btn:hover { background: rgba(70,25,40,0.75); border-color
   }
 
   window.island = { upsertRow:upsertRow, removeRow:removeRow, setScale:setScale, setTheme:setTheme };
-
-  // Focus button: send session id + ppid so the native host can activate the
-  // terminal window in the same event handler (avoids foreground-lock round-trip).
-  stack.addEventListener('click', function(e) {
-    var btn = e.target.closest('.focus-btn');
-    if (!btn) return;
-    e.stopPropagation();
-    var id = btn.getAttribute('data-id');
-    var ppid = parseInt(btn.getAttribute('data-ppid'), 10) || 0;
-    if (id && window.islandHost) {
-      window.islandHost.send({ type: 'focus-session', id: id, ppid: ppid });
-    }
-  });
 })();
 </script>
 </body>

@@ -13,7 +13,7 @@ description: >
 
 # 灵动岛 (Dynamic Island) for Claude Code
 
-配置一个电脑桌面级灵动岛风格的状态胶囊，固定在屏幕顶部，实时显示 Claude Code 当前正在做什么，并支持跳转对应窗口
+配置一个电脑桌面级灵动岛风格的状态胶囊，固定在屏幕顶部，实时显示 Claude Code 当前正在做什么
 
 - **Windows**: 屏幕顶部居中胶囊，WinForms + WebView2
 
@@ -295,7 +295,6 @@ node ~/.claude/skills/island/src/bridge.mjs status
 - **偏好设置**: `~/.claude/claude-island.json`（enabled, scale, screen, theme）
 - **会话状态**: `~/.claude/claude-island-state.json`（`_sessionData` 按 session_id 隔离各会话）
 - **PID 文件**: `~/.claude/claude-island.pid`（用于精确进程管理）
-- **聚焦按钮**: 鼠标悬停在灵动岛上时，每行左侧出现 ↗ 圆形按钮，点击可聚焦到对应 session 的终端窗口。支持 WezTerm、Windows Terminal、PowerShell、CMD、Git Bash、VSCode 终端。
 - **主题切换**: 支持 dark（默认黑色）、pink（马卡龙粉）、auto（跟随系统）三种主题，通过 `/island theme` 切换。
 
 当灵动岛需要更新时，应当在一次命令中杀掉已有的灵动岛进程并进行更新，避免多次命令间hook重启旧灵动岛程序。

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概述
 
-本仓库是一个 Claude Code 的 **skill**（`island`）：在 **Windows** 屏幕顶部显示桌面级「灵动岛」状态胶囊，实时反映 Claude Code 当前在做什么（思考 / 读取 / 编辑 / 写入 / 执行 / 搜索 / 完成 / 等待确认），并支持点击跳转回对应会话的终端窗口。仅支持 Windows（WinForms + WebView2）。
+本仓库是一个 Claude Code 的 **skill**（`island`）：在 **Windows** 屏幕顶部显示桌面级「灵动岛」状态胶囊，实时反映 Claude Code 当前在做什么（思考 / 读取 / 编辑 / 写入 / 执行 / 搜索 / 完成 / 等待确认）。仅支持 Windows（WinForms + WebView2）。
 
 `island/SKILL.md` 是 **skill 的唯一权威文档**（Claude Code 加载 skill 时读取它，含安装、`/island` 命令、故障排查）。`README.md` 面向 GitHub 访客。两者在行为/命令变化时都需同步。
 
@@ -48,7 +48,6 @@ island-host-win.exe  C# WinForms + WebView2 原生窗口   (hosts/windows/island
 - **hook 数据走 stdin JSON，不是命令行变量替换。** Claude Code **不会**替换命令里的 `${PROMPT}` / `${TOOL_NAME}`；真实字段在 stdin 的 JSON payload 里。`bridge.mjs` 按 `hook_event_name` 分派，`tool_name` 经 `toolToIsland()` 映射到状态。
 - **bridge 一次性、companion 常驻。** bridge 每次 hook 都是新进程、自身不存状态；跨调用的会话状态持久化在 `~/.claude/claude-island-state.json` 的 `_sessionData[sessionId]` 下，按 session 隔离以免多会话串扰，10 分钟不活跃自动清理。
 - **companion 单例。** 命名管道地址被占用（EADDRINUSE）时，后启动者直接退出，保证全局只有一个守护进程。
-- **窗口聚焦由 C# 主机做。** 点胶囊行左侧 ↗ 按钮 → WebView 发 WebMessage → C# 主机在 UI 线程调 `SetForegroundWindow`（隐藏的后台 node 进程调用会失败，所以必须在主机侧做）。companion 仅对 Windows Terminal / WezTerm 额外切 tab / pane。
 - **平台分支集中在 platform.mjs。** 屏幕几何、窗口定位、屏幕数量全走 PowerShell；其他文件不直接判断 `process.platform`。`SUPPORTED_PLATFORMS` 仅 `win32`。
 - **灵动岛只限 Windows *桌面*，不限 Claude Code 的宿主——WSL2 一样能驱动。** 上面的 `SUPPORTED_PLATFORMS` 仅 `win32` 约束的是 **bridge / companion 必须由 Windows node 运行**，不是要求 Claude Code 跑在 Windows 原生终端。在 WSL2 里，把 hook 命令里的 `node` 换成 `node.exe`（Windows node，WSL interop 可直接调用并原样透传 stdin），bridge 就跑在 Windows 侧，后续链路与纯 Windows 完全一致。已实测：从 WSL 跑 `echo JSON | node.exe <仓库>/island/src/bridge.mjs hook` 能正常开窗、状态实时更新、中文 / emoji prompt 无损，且因 `WT_SESSION` 经 WSLENV 透传，终端仍被识别为 `windows-terminal`。代价：每个 hook 多一次 interop 冷启动开销。**别再断言「WSL 下做不了」。**
 - **发往 C# 主机的 stdin 只传 ASCII。** `open-fixed.mjs` 把 JSON 里的非 ASCII 字符转成 `\uXXXX`，规避 Windows 管道编码导致的 Unicode 损坏。

@@ -104,114 +104,6 @@ function truncate(s, max) {
   return clean.length > max ? clean.slice(0, max - 1) + "…" : clean;
 }
 
-// ── Terminal detection for focus-button feature ─────────────────────
-let _terminalInfo = null;
-function getTerminalInfo() {
-  if (_terminalInfo) return _terminalInfo;
-  const info = {
-    termType: "generic",
-    termPpid: process.ppid,
-    termPid: process.ppid, // resolved below to the actual terminal process PID
-    tabIndex: -1,           // Windows Terminal tab index (0-based)
-  };
-
-  // WezTerm: WEZTERM_PANE env var
-  if (process.env.WEZTERM_PANE) {
-    info.termType = "wezterm";
-    info.termId = process.env.WEZTERM_PANE;
-  }
-  // Windows Terminal: WT_SESSION env var
-  else if (process.env.WT_SESSION) {
-    info.termType = "windows-terminal";
-    info.termId = process.env.WT_SESSION;
-  }
-  // VSCode integrated terminal
-  else if (process.env.TERM_PROGRAM === "vscode") {
-    info.termType = "vscode";
-  }
-  // Git Bash / MSYS2 / Cygwin (mintty): MSYSTEM or TERM=xterm are definitive
-  else if (process.env.MSYSTEM || process.env.TERM === "xterm") {
-    info.termType = "git-bash";
-  }
-  // CMD: PROMPT is set to $P$G by default; PowerShell does not set it.
-  // Must be checked BEFORE PSModulePath because PSModulePath is a
-  // system-wide env var that CMD inherits when PowerShell is installed.
-  else if (process.env.PROMPT) {
-    info.termType = "cmd";
-  }
-  // PowerShell: PSModulePath is always set by both 5.1 and 7+
-  else if (process.env.PSModulePath) {
-    info.termType = "powershell";
-  }
-
-  // Walk process tree from our own PID up to find the terminal process.
-  // This PID stays valid (unlike process.ppid which may be a short-lived
-  // hook shell that exits before the user clicks the focus button).
-	  if (process.platform === "win32") {
-	    try {
-	      let pid = null;
-
-	      // For WezTerm and Windows Terminal, the shell (cmd/powershell) runs
-	      // inside the terminal emulator as a child process.  Walking up from
-	      // process.ppid would stop at the shell and miss the actual terminal
-	      // window process.  Search by process name directly instead.
-	      if (info.termType === "wezterm") {
-	        const out = execSync(
-	          `powershell -NoProfile -Command "(Get-Process -Name wezterm-gui -EA SilentlyContinue | Select-Object -First 1).Id"`,
-	          { timeout: 3000, stdio: "pipe", windowsHide: true }
-	        ).toString().trim();
-	        if (out && /^\d+$/.test(out)) pid = parseInt(out, 10);
-	      } else if (info.termType === "windows-terminal") {
-	        // Walk process tree from PowerShell's own $PID up to WindowsTerminal.exe.
-	        // $PID (not process.ppid) is used because ppid may be a short-lived hook
-	        // shell that has already exited.
-	        const walkOut = execSync(
-	          `powershell -NoProfile -Command "$p=$PID;$found=$null;while($p -and $p -gt 4){$proc=Get-CimInstance Win32_Process -Filter \"ProcessId=$p\" -EA SilentlyContinue;if(-not $proc){break};if($proc.Name -eq 'WindowsTerminal.exe'){$found=$p;break};$p=$proc.ParentProcessId};$found"`,
-	          { timeout: 5000, stdio: "pipe", windowsHide: true }
-	        ).toString().trim();
-	        if (walkOut && /^\d+$/.test(walkOut)) {
-	          pid = parseInt(walkOut, 10);
-	        } else {
-	          // ConPTY may have broken the parent chain; fall back to first WT window by name.
-	          // In multi-WT-window setups this may activate the wrong window.
-	          log("WT pid: process tree walk failed, falling back to Get-Process by name (multi-window may focus wrong window)");
-	          const fbOut = execSync(
-	            `powershell -NoProfile -Command "(Get-Process -Name WindowsTerminal -EA SilentlyContinue | Select-Object -First 1).Id"`,
-	            { timeout: 3000, stdio: "pipe", windowsHide: true }
-	          ).toString().trim();
-	          if (fbOut && /^\d+$/.test(fbOut)) pid = parseInt(fbOut, 10);
-	        }
-        // Detect which tab we are in: list WT children, walk up from ppid.
-        // Child index ≈ tab index because WT spawns shells in tab order.
-        try {
-          if (!pid) throw new Error("wt pid not found for tab detection");
-          const tabOut = execSync(
-            `powershell -NoProfile -Command "$wtPid=${pid};$children=@(Get-CimInstance Win32_Process -Filter \\"ParentProcessId=$wtPid\\"| Where-Object {$_.Name -match '^(cmd|powershell|pwsh|wsl|bash)\\.exe$'}| Sort-Object CreationDate| Select-Object -ExpandProperty ProcessId);$p=${process.ppid};$idx=-1;while($p -gt 0){for($i=0;$i -lt $children.Count;$i++){if($children[$i] -eq $p){$idx=$i;break}};if($idx -ge 0){break};try{$p=(Get-CimInstance Win32_Process -Filter \\"ProcessId=$p\\" -EA Stop).ParentProcessId}catch{break}};$idx"`,
-            { timeout: 5000, stdio: "pipe", windowsHide: true }
-          ).toString().trim();
-          const tabIdx = parseInt(tabOut);
-          if (!isNaN(tabIdx) && tabIdx >= 0) info.tabIndex = tabIdx;
-        } catch (e) { log(`tabIndex detection: ${e.message}`); }
-
-	      } else {
-	        // CMD / PowerShell / Git Bash / VSCode — walk process tree up from ppid
-	        const out = execSync(
-	          `powershell -NoProfile -Command "$p=${process.ppid};while($p){$n=(Get-Process -Id $p -EA SilentlyContinue).ProcessName;if($n -match '^(cmd|powershell|pwsh|mintty|Code|conhost)$'){$p;break};try{$p=(Get-CimInstance Win32_Process -Filter \"ProcessId=$p\" -EA Stop).ParentProcessId}catch{break}}"`,
-	          { timeout: 3000, stdio: "pipe", windowsHide: true }
-	        ).toString().trim();
-	        if (out && /^\d+$/.test(out)) pid = parseInt(out, 10);
-	      }
-
-	      if (pid && pid > 0) info.termPid = pid;
-	    } catch { /* keep termPid = process.ppid as fallback */ }
-	  }
-
-
-  _terminalInfo = info;
-  log(`terminal: type=${info.termType} id=${info.termId || 'none'} termPid=${info.termPid} ppid=${info.termPpid}`);
-  return info;
-}
-
 // ── Socket helpers ──────────────────────────────────────────────────────
 function connectOnce() {
   return new Promise((resolve) => {
@@ -365,7 +257,6 @@ async function handleHook(json) {
         id: sessionId, type: "update",
         project, status: "thinking", detail: "",
         prompt: sess.prompt, startedAt: sess.startedAt, frozenElapsed: null,
-        ...getTerminalInfo(),
       });
       break;
     }
@@ -386,7 +277,6 @@ async function handleHook(json) {
         id: sessionId, type: "update",
         project, status: upd.status, detail: upd.detail,
         prompt: sess.prompt || "", startedAt: sess.startedAt, frozenElapsed: null,
-        ...getTerminalInfo(),
       });
       break;
     }
@@ -402,14 +292,12 @@ async function handleHook(json) {
           id: sessionId, type: "update",
           project, status: "error", detail: toolName,
           prompt: sess.prompt || "", startedAt: sess.startedAt, frozenElapsed: null,
-          ...getTerminalInfo(),
         });
       } else if (sess.activeToolCount === 0 && sess.inAgent) {
         await sendToCompanion({
           id: sessionId, type: "update",
           project, status: "thinking", detail: "",
           prompt: sess.prompt || "", startedAt: sess.startedAt, frozenElapsed: null,
-          ...getTerminalInfo(),
         });
       }
       break;
@@ -422,7 +310,6 @@ async function handleHook(json) {
         id: sessionId, type: "update",
         project, status: "waiting", detail: toolName,
         prompt: sess.prompt || "", startedAt: sess.startedAt, frozenElapsed: null,
-        ...getTerminalInfo(),
       });
       break;
     }
@@ -435,7 +322,6 @@ async function handleHook(json) {
         id: sessionId, type: "update",
         project, status: "done", detail: "",
         prompt: sess.prompt || "", startedAt: sess.startedAt, frozenElapsed: sess.frozenElapsed,
-        ...getTerminalInfo(),
       });
       await sendToCompanion({ id: sessionId, type: "done-retract", delayMs: 30000 });
       try {
@@ -459,7 +345,6 @@ async function handleHook(json) {
         id: sessionId, type: "update",
         project, status: "error", detail: "interrupted",
         prompt: sess.prompt || "", startedAt: sess.startedAt, frozenElapsed: sess.frozenElapsed,
-        ...getTerminalInfo(),
       });
       await sendToCompanion({ id: sessionId, type: "done-retract", delayMs: 30000 });
       try {

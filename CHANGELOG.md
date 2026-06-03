@@ -15,6 +15,14 @@
 - `README.md` / `island/SKILL.md`：同步「WSL2 宿主」用法——README 安装节后新增 WSL2 提示框；SKILL 依赖节后新增「Claude Code 运行在 WSL2 时」小节，说明 hook 命令改用 `node.exe` + `C:/` 路径、interop 透传 stdin。实测：WSL 的 `/root/.claude/settings.json` 配 `node.exe` hooks 后，当前 WSL 会话被 Claude Code 热加载并真实驱动上岛（log 出现真实 session_id 的 update）。
 - `README.md`：补齐与当前实现的差异——新增 `/island theme <dark|pink|auto>` 命令、`screen all` 选项、聚焦跳转说明；架构图 hook 列表补全为 7 个（增加 `StopFailure`、`PermissionRequest`）；新增「更新日志」指向。
 - 初始化 Git 仓库，推送至 `github.com/zenbinhao/cc-island-win`。
+- `island/src/hosts/windows/island-host.csproj`：WebView2 `PackageReference` 由浮动 `1.*` 固定为 `1.0.3912.50`（与仓库已提交的 WebView2 DLL 版本一致）。背景：浮动版本会让重新编译时拉到更新的 WebView2（实测拉到 `1.0.3967.48`），新生成的 `deps.json` 与已提交 DLL 不符，exe 启动即抛 `FileNotFoundException: Microsoft.Web.WebView2.WinForms`；固定版本保证重编确定性、不产生无关的 WebView2 二进制改动。预编译 `island-host-win.exe`/`.dll`/`.deps.json`/`.runtimeconfig.json` 随聚焦功能删除一并重新编译提交。
 
 ### Removed
+- **聚焦跳转功能（↗ 按钮）整体删除**：移除「鼠标悬停胶囊、每行左侧浮现 ↗ 圆形按钮、点击跳回对应会话终端窗口」的全部能力。涉及四层：
+  - `island.html.mjs`：删 `.focus-btn` 样式、`body.island-hover` 整排变暗规则、按钮 DOM 创建与 `data-ppid`、`stack` 上的点击监听。
+  - `bridge.mjs`：删整个 `getTerminalInfo()` 终端探测（含每个 hook 一串 PowerShell 进程树遍历 + WT tabIndex 检测）与 7 处 `...getTerminalInfo()` 注入。**副作用：每个 hook 不再起 PowerShell，明显提速，WSL2（每个 hook 已是一次 interop 冷启动）下尤其明显。**
+  - `companion.mjs`：删 `sessionTerminal` 表、`focusTerminal()`、WT `focus-tab` / WezTerm `activate-pane` 调用、`focus-session` 窗口消息处理，及 update 日志里的 `termType`/`tabIndex` 字段。
+  - `island-host.cs`：删 `ActivateWindow` 抢前台全套 Win32 P/Invoke（`SetForegroundWindow`/`AttachThreadInput`/ALT 键 trick/Toolhelp 进程树等）、60ms hover 轮询 `StartHoverDetection`、`WM_LBUTTONDOWN` 处理与 `OnButtonRowClick`、`activate` stdin 命令；`WM_NCHITTEST` 由「仅放行按钮命中区」改为**整窗点击穿透**（消除了原按钮区那条隐形不可穿透的死区）。
+  - `open-fixed.mjs`：删不再被调用的 `activate()` 包装。
+  - **背景**：维护者在 WSL2 高频使用、常在单个窗口内分屏跑 2–3 个 CLI，「按窗口聚焦」无法区分同一窗口里的多个 pane；且该交互体验与外观均不满意，故整体砍掉。灵动岛回归纯状态展示。
 - `island/src/island.md`：删除 `SKILL.md` 的过时旧副本。该文件内容已与实现脱节（旧脚本路径少了 `src/`、依赖已废弃的 `prompt`/`tool-start`/`tool-end`/`done` 子命令、误述「完成后 5 秒自动消失」实际为 30 秒、缺少 theme / StopFailure / PermissionRequest），留在公开仓库会误导读者。**skill 的唯一权威文档为 `island/SKILL.md`。**
