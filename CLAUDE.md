@@ -1,0 +1,61 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## 项目概述
+
+本仓库是一个 Claude Code 的 **skill**（`island`）：在 **Windows** 屏幕顶部显示桌面级「灵动岛」状态胶囊，实时反映 Claude Code 当前在做什么（思考 / 读取 / 编辑 / 写入 / 执行 / 搜索 / 完成 / 等待确认），并支持点击跳转回对应会话的终端窗口。仅支持 Windows（WinForms + WebView2）。
+
+`island/SKILL.md` 是 **skill 的唯一权威文档**（Claude Code 加载 skill 时读取它，含安装、`/island` 命令、故障排查）。`README.md` 面向 GitHub 访客。两者在行为/命令变化时都需同步。
+
+## 常用命令
+
+脚本都在 `island/src/`，用 Node.js 运行（Claude Code 自带 node）。**仅在 Windows 上能完整运行**——会涉及命名管道与原生 exe。
+
+```bash
+# 运行测试套件：向 bridge 灌入模拟的 hook stdin JSON，验证事件分派、
+# 跨 session 数据隔离、工具名→状态映射、过期 session 清理。
+# 会读写真实的 ~/.claude/claude-island-state.json，退出码表示通过/失败。
+node island/src/island-test.mjs
+
+# 编译 Windows 原生主机（仅当预编译 exe 丢失时才需要，要装 .NET 8 SDK）
+node island/src/build.mjs
+
+# 手动驱动灵动岛（CLI 模式子命令）
+node island/src/bridge.mjs <on|off|toggle|scale|screen|theme|reload|kill|status|init>
+
+# 调试 companion：直接前台运行，stderr 实时打印到终端
+node island/src/companion.mjs
+```
+
+## 架构
+
+四层、跨进程的状态管道——改动其中一环通常要同时看相邻文件：
+
+```
+Claude Code hooks (settings.json)
+  ↓ stdin JSON   SessionStart / UserPromptSubmit / PreToolUse / PostToolUse / Stop / StopFailure / PermissionRequest
+bridge.mjs           一次性进程：每次 hook 调用启动一次，读 stdin JSON，转成状态消息
+  ↓ 命名管道  //./pipe/claude-island   (socket-path.mjs)
+companion.mjs        常驻守护进程：socket 服务端 + 拥有原生窗口，按 session 渲染各自的胶囊行
+  ↓ stdin/stdout JSON-line 协议   (open-fixed.mjs 封装 spawn)
+island-host-win.exe  C# WinForms + WebView2 原生窗口   (hosts/windows/island-host.cs)
+  └─ 渲染透明背景胶囊 HTML   (island.html.mjs 生成的 HTML/CSS/JS 字符串)
+```
+
+跨文件的关键设计（容易踩坑）：
+
+- **hook 数据走 stdin JSON，不是命令行变量替换。** Claude Code **不会**替换命令里的 `${PROMPT}` / `${TOOL_NAME}`；真实字段在 stdin 的 JSON payload 里。`bridge.mjs` 按 `hook_event_name` 分派，`tool_name` 经 `toolToIsland()` 映射到状态。
+- **bridge 一次性、companion 常驻。** bridge 每次 hook 都是新进程、自身不存状态；跨调用的会话状态持久化在 `~/.claude/claude-island-state.json` 的 `_sessionData[sessionId]` 下，按 session 隔离以免多会话串扰，10 分钟不活跃自动清理。
+- **companion 单例。** 命名管道地址被占用（EADDRINUSE）时，后启动者直接退出，保证全局只有一个守护进程。
+- **窗口聚焦由 C# 主机做。** 点胶囊行左侧 ↗ 按钮 → WebView 发 WebMessage → C# 主机在 UI 线程调 `SetForegroundWindow`（隐藏的后台 node 进程调用会失败，所以必须在主机侧做）。companion 仅对 Windows Terminal / WezTerm 额外切 tab / pane。
+- **平台分支集中在 platform.mjs。** 屏幕几何、窗口定位、屏幕数量全走 PowerShell；其他文件不直接判断 `process.platform`。`SUPPORTED_PLATFORMS` 仅 `win32`。
+- **发往 C# 主机的 stdin 只传 ASCII。** `open-fixed.mjs` 把 JSON 里的非 ASCII 字符转成 `\uXXXX`，规避 Windows 管道编码导致的 Unicode 损坏。
+- **预编译 exe 有意提交进仓库**（`island/src/hosts/windows/`），让用户免装 .NET SDK 即可运行；`build.mjs` 只在 exe 丢失时用到。`.pdb` 与 WebView2 `*.xml` 文档不入库（见 `.gitignore`）。
+
+## 仓库维护约定
+
+- **自律用 git 维护版本**：推进本项目时主动用 git 提交，提交信息说明改了什么；无需每次征求是否提交。先在分支上工作，按需推送到远端。
+- **及时同步文档**：行为 / 命令变化时，同步更新 `README.md` 与 `island/SKILL.md`。
+- **维护 `CHANGELOG.md`**：每次维护新增 / 删减的内容都记在这里，含变更说明与背景。**变更历史与注解一律以 `CHANGELOG.md` 为准**——CLAUDE.md 不内联变更注解，只在此指向 `CHANGELOG.md`。
+- **远端**：`git@github.com:zenbinhao/cc-island-win.git`（SSH，身份 `zenbinhao`）。

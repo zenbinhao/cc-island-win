@@ -1,0 +1,29 @@
+# Build artifacts
+bin/
+obj/
+*.user
+*.suo
+.vs/
+
+# .NET native host: the prebuilt exe/dll/*.json under island/src/hosts/windows/
+# are intentionally committed (users run without the .NET SDK). Only exclude
+# debug symbols and IntelliSense docs, which are not needed at runtime.
+*.pdb
+Microsoft.Web.WebView2.*.xml
+
+# Node
+node_modules/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# IDE
+.vscode/
+.idea/
+
+# Blog article (not part of the skill)
+ARTICLE.md
