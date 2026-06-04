@@ -91,6 +91,7 @@ function readPref() {
 // ── Window setup ───────────────────────────────────────────────────────
 const WIN_W = 640;
 const WIN_H = 52;
+const WIN_H_COLLAPSED = 30;
 
 const _pref = readPref();
 const SCREEN_PREF = typeof _pref.screen === "string" && _pref.screen.length > 0 ? _pref.screen : "primary";
@@ -118,6 +119,7 @@ log("info", `windows=${screenGeos.length}`);
 // currentRows: id → js string — used to replay state into newly-ready windows
 const currentRows = new Map();
 const wins = [];
+let isCollapsed = false;
 
 const MAX_PENDING = 200;
 const pending = []; // JS strings queued before any window is ready
@@ -162,6 +164,14 @@ for (const geo of screenGeos) {
     log("info", `window ready at (${x},${y}): ${JSON.stringify(info)}`);
     initWindow(w);
   });
+  w.on("message", (data) => {
+    // Handle messages from WebView (e.g., collapse button clicks)
+    if (data && data.action === "collapseChanged") {
+      isCollapsed = data.collapsed;
+      log("info", `collapse state changed: ${isCollapsed}`);
+      syncHeight();
+    }
+  });
   w.on("closed", () => {
     log("info", `window closed at (${x},${y})`);
     cleanup();
@@ -183,20 +193,14 @@ try { mkdirSync(PREF_DIR, { recursive: true }); } catch (e) { log("warn", `mkdir
 const clients = new Set();
 const socketIds = new WeakMap();
 const activeRowIds = new Set();
-let idleTimer = null;
 
 function syncHeight() {
-  const h = Math.max(52, activeRowIds.size * 36 + 8);
-  for (const w of wins) { try { w.resize(WIN_W, h); } catch {} }
-}
-
-function scheduleIdleExit() {
-  if (idleTimer) clearTimeout(idleTimer);
-  idleTimer = setTimeout(() => {
-    log("info", "all clients disconnected, exiting companion");
-    cleanup();
-    process.exit(0);
-  }, 60000); // exit 60s after last client disconnects
+  if (isCollapsed) {
+    for (const w of wins) { try { w.resize(WIN_W, WIN_H_COLLAPSED); } catch {} }
+  } else {
+    const h = Math.max(52, activeRowIds.size * 36 + 8);
+    for (const w of wins) { try { w.resize(WIN_W, h); } catch {} }
+  }
 }
 
 const server = createServer((sock) => {
@@ -218,6 +222,12 @@ const server = createServer((sock) => {
       if (!msg.id || !VALID_STATUS.has(msg.status)) return;
       log("info", `update id=${msg.id} status=${msg.status} project=${msg.project||''} prompt="${(msg.prompt||'').substring(0,40)}"`);
       activeRowIds.add(msg.id);
+      // Auto-expand when new update arrives
+      if (isCollapsed) {
+        isCollapsed = false;
+        send('window.island.setCollapsed(false)');
+        log("info", "auto-expanded due to new update");
+      }
       syncHeight();
       const js = 'window.island.upsertRow(' + JSON.stringify(msg.id) + ',' + JSON.stringify(msg) + ')';
       currentRows.set(msg.id, js);

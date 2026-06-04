@@ -244,10 +244,55 @@ body.theme-pink .row[data-status="done"] .braille {
 }
 
 #stack { opacity: 1; }
+
+/* ── Collapse toggle button ──────────────────────────────────────────── */
+#collapse-btn {
+  position: fixed;
+  bottom: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  width: calc(40px * var(--scale));
+  height: calc(30px * var(--scale));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  background: transparent;
+  border: none;
+  padding: 0;
+  z-index: 1000;
+  pointer-events: auto;
+  transition: opacity 200ms ease;
+}
+#collapse-btn:hover { opacity: 0.7; }
+#collapse-btn svg {
+  width: calc(16px * var(--scale));
+  height: calc(16px * var(--scale));
+  fill: var(--project-color);
+  transition: transform 300ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+body.collapsed #collapse-btn svg {
+  transform: rotate(180deg);
+}
+
+/* ── Collapsed state ─────────────────────────────────────────────────── */
+body.collapsed #stack {
+  opacity: 0;
+  pointer-events: none;
+  max-height: 0;
+  overflow: hidden;
+  transition: opacity 300ms cubic-bezier(0.32, 0.72, 0, 1),
+              max-height 300ms cubic-bezier(0.32, 0.72, 0, 1);
+}
 </style>
 </head>
 <body>
 <div id="stack"></div>
+<button id="collapse-btn" aria-label="Toggle collapse">
+  <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+    <path d="M8 4 L12 10 L4 10 Z"/>
+  </svg>
+</button>
 <script>
 (function () {
   var stack = document.getElementById('stack');
@@ -410,7 +455,43 @@ body.theme-pink .row[data-status="done"] .braille {
     });
   }
 
-  window.island = { upsertRow:upsertRow, removeRow:removeRow, setScale:setScale, setTheme:setTheme };
+  // ── Collapse state management ─────────────────────────────────────────
+  var collapsed = false;
+
+  function setCollapsed(state) {
+    collapsed = state;
+    if (collapsed) {
+      document.body.classList.add('collapsed');
+    } else {
+      document.body.classList.remove('collapsed');
+    }
+  }
+
+  function toggleCollapse() {
+    setCollapsed(!collapsed);
+    // Notify companion about state change
+    if (window.islandHost && window.islandHost.send) {
+      window.islandHost.send({ action: 'collapseChanged', collapsed: collapsed });
+    }
+  }
+
+  // ── Collapse button click handler ──────────────────────────────────────
+  var collapseBtn = document.getElementById('collapse-btn');
+  if (collapseBtn) {
+    collapseBtn.addEventListener('click', function(e) {
+      e.stopPropagation();
+      toggleCollapse();
+    });
+  }
+
+  window.island = {
+    upsertRow: upsertRow,
+    removeRow: removeRow,
+    setScale: setScale,
+    setTheme: setTheme,
+    setCollapsed: setCollapsed,
+    toggleCollapse: toggleCollapse
+  };
 })();
 </script>
 </body>
