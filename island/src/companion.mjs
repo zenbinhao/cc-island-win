@@ -50,7 +50,7 @@ log("info", `companion starting (pid=${process.pid}, platform=${process.platform
 
 // Kill any orphaned native host windows from a previous abnormal exit
 try {
-  execSync("taskkill /F /IM island-host-win.exe 2>nul", { timeout: 3000, stdio: "pipe", windowsHide: true });
+  execSync("taskkill /F /IM island-host-win.exe", { timeout: 3000, stdio: "pipe", windowsHide: true });
   log("info", "cleaned up orphaned island-host-win processes");
 } catch (e) { /* no orphaned processes — expected */ }
 
