@@ -55,7 +55,7 @@ island-host-win.exe  C# WinForms + WebView2 原生窗口   (hosts/windows/island
 
 ## 仓库维护约定
 
-- **自律用 git 维护版本**：推进本项目时主动用 git 提交，提交信息说明改了什么；无需每次征求是否提交。先在分支上工作，按需推送到远端。
+- **自律用 git 维护版本**：推进本项目时主动用 git commit，提交信息说明改了什么；无需每次征求是否提交。先在*-dev分支上工作，验证完成后，直接push到远端*-dev分支，master分支仅允许用户自己操作。
 - **及时同步文档**：行为 / 命令变化时，同步更新 `README.md` 与 `island/SKILL.md`。
 - **维护 `CHANGELOG.md`**：每次维护新增 / 删减的内容都记在这里，含变更说明与背景。**变更历史与注解一律以 `CHANGELOG.md` 为准**——CLAUDE.md 不内联变更注解，只在此指向 `CHANGELOG.md`。
 - **远端**：`git@github.com:zenbinhao/cc-island-win.git`（SSH，身份 `zenbinhao`）。
