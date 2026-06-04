@@ -206,7 +206,6 @@ function syncHeight() {
 const server = createServer((sock) => {
   clients.add(sock);
   socketIds.set(sock, new Set());
-  if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
   log("info", `client connected (total=${clients.size})`);
 
   const rl = createInterface({ input: sock, crlfDelay: Infinity });
@@ -269,7 +268,6 @@ const server = createServer((sock) => {
     const ids = socketIds.get(sock);
     if (ids) socketIds.delete(sock);
     log("info", `client disconnected (total=${clients.size})`);
-    if (clients.size === 0) scheduleIdleExit();
   });
   sock.on("error", (e) => {
     log("warn", `socket error: ${e.message}`);
