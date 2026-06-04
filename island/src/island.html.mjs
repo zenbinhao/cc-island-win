@@ -123,9 +123,8 @@ html, body {
   opacity: 0;
   transition: opacity 140ms ease, background 140ms ease;
 }
-.row:hover .dismiss { opacity: 0.85; }
-.dismiss:hover { opacity: 1; background: rgba(255,255,255,0.2); }
-.row:hover .slot.right { opacity: 0.25; transition: opacity 140ms ease; }
+.row.hovered .dismiss { opacity: 0.9; }
+.row.hovered .slot.right { opacity: 0.3; margin-right: calc(20px * var(--scale)); transition: opacity 140ms ease, margin-right 140ms ease; }
 
 /* ── Dark theme animations (default) ─────────────────────────────── */
 @keyframes pulse-waiting {
@@ -537,15 +536,34 @@ body.collapsed #stack {
     reportTimer = setTimeout(reportHitRects, 360);
   }
 
-  // ── Per-row × dismiss (delegated click; only hittable on the right-edge strip) ──
-  stack.addEventListener('click', function (e) {
-    var btn = e.target && e.target.closest ? e.target.closest('.dismiss') : null;
-    if (!btn) return;
-    var id = btn.getAttribute('data-id');
+  // ── Interaction driven by the native WH_MOUSE_LL hook ──────────────────
+  // The window is click-through at the compositor level, so DOM never receives
+  // real mouse events. The host forwards cursor coords (CSS px) here instead:
+  //   hover(x,y)    — reveal × on the row under the cursor (replaces CSS :hover)
+  //   hitClick(x,y) — a click landed inside a reported hit rect; act on it
+  function dismissRow(id) {
     if (!id) return;
     if (window.islandHost && window.islandHost.send) window.islandHost.send({ type:'dismiss', id:id });
-    removeRow(id);
-  });
+    removeRow(id);   // optimistic; companion 的 removeRow 广播是幂等的
+  }
+
+  var _hoverRow = null;
+  function hover(x, y) {
+    var el = (x >= 0 && y >= 0) ? document.elementFromPoint(x, y) : null;
+    var row = (el && el.closest) ? el.closest('.row') : null;
+    if (row === _hoverRow) return;
+    if (_hoverRow) _hoverRow.classList.remove('hovered');
+    _hoverRow = row;
+    if (row) row.classList.add('hovered');
+  }
+
+  function hitClick(x, y) {
+    var el = document.elementFromPoint(x, y);
+    if (!el || !el.closest) return;
+    if (el.closest('#collapse-btn')) { toggleCollapse(); return; }
+    var row = el.closest('.row');
+    if (row) dismissRow(row.getAttribute('data-id'));
+  }
 
   window.island = {
     upsertRow: upsertRow,
@@ -553,7 +571,9 @@ body.collapsed #stack {
     setScale: setScale,
     setTheme: setTheme,
     setCollapsed: setCollapsed,
-    toggleCollapse: toggleCollapse
+    toggleCollapse: toggleCollapse,
+    hover: hover,
+    hitClick: hitClick
   };
 })();
 </script>

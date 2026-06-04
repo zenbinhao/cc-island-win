@@ -85,7 +85,11 @@ sealed class IslandForm : Form
     const int HTCLIENT      = 1;
 
     // Hittable rectangles in client pixels — set from WebView "hitrects" messages.
-    // Only these regions receive clicks; the rest of the window stays click-through.
+    // The WH_MOUSE_LL hook in IslandHost tests clicks/hover against these. The window
+    // is transparent + click-through at the compositor level (WebView2 paints on a
+    // separate DirectComposition layer outside the layered hit-test surface), so the
+    // WM_NCHITTEST handler below never actually fires for content — the hook is what
+    // makes the collapse button and per-row × clickable.
     public Rectangle[] HitRects = Array.Empty<Rectangle>();
 
     [StructLayout(LayoutKind.Sequential)]
@@ -151,6 +155,27 @@ sealed class IslandHost : IDisposable
     [DllImport("user32.dll")] static extern int GetWindowLong(IntPtr h, int i);
     [DllImport("user32.dll")] static extern int SetWindowLong(IntPtr h, int i, int v);
     [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr h, IntPtr a, int x, int y, int w, int ht, uint f);
+
+    // ── Low-level mouse hook: makes the click-through overlay's hotspots clickable ──
+    // The window is transparent + click-through at the compositor level (WebView2 paints
+    // on a separate DirectComposition layer that is NOT part of the layered hit-test
+    // surface), so the Form's WM_NCHITTEST never fires for content. A global WH_MOUSE_LL
+    // hook intercepts clicks over the reported hit rects (collapse btn + per-row × strip)
+    // and drives hover, instead of relying on the window receiving mouse input.
+    const int WH_MOUSE_LL = 14;
+    const int WM_MOUSEMOVE = 0x0200, WM_LBUTTONDOWN = 0x0201, WM_LBUTTONUP = 0x0202;
+    delegate IntPtr LowLevelMouseProc(int nCode, IntPtr wParam, IntPtr lParam);
+    [StructLayout(LayoutKind.Sequential)] struct MSLLHOOKSTRUCT { public Point pt; public uint mouseData, flags, time; public IntPtr dwExtraInfo; }
+    [DllImport("user32.dll")] static extern IntPtr SetWindowsHookEx(int id, LowLevelMouseProc cb, IntPtr hMod, uint thread);
+    [DllImport("user32.dll")] static extern bool UnhookWindowsHookEx(IntPtr h);
+    [DllImport("user32.dll")] static extern IntPtr CallNextHookEx(IntPtr h, int nCode, IntPtr wParam, IntPtr lParam);
+    [DllImport("kernel32.dll", CharSet = CharSet.Auto)] static extern IntPtr GetModuleHandle(string? name);
+
+    private IntPtr _mouseHook;
+    private LowLevelMouseProc? _mouseProc; // keep delegate alive (GC)
+    private double _dpr = 1.0;
+    private int _lastHoverTick;
+    private bool _hovering, _swallowUp;
 
     const string BridgeJs = """
         window.islandHost = {
@@ -268,6 +293,8 @@ sealed class IslandHost : IDisposable
         _webView.CoreWebView2.Settings.IsStatusBarEnabled = false;
         _webView.CoreWebView2.Settings.IsZoomControlEnabled = false;
 
+        InstallMouseHook();
+
         _webView.CoreWebView2.WebMessageReceived += (_, args) =>
         {
             try
@@ -370,6 +397,7 @@ sealed class IslandHost : IDisposable
     {
         var arr = msg["rects"]?.AsArray();
         double dpr = msg["dpr"]?.GetValue<double>() ?? 1.0;
+        _dpr = dpr > 0 ? dpr : 1.0;
         if (arr == null) { Form.HitRects = Array.Empty<Rectangle>(); return; }
         var list = new List<Rectangle>(arr.Count);
         foreach (var r in arr)
@@ -383,6 +411,67 @@ sealed class IslandHost : IDisposable
         }
         Form.HitRects = list.ToArray();
     }
+
+    private void InstallMouseHook()
+    {
+        if (!_config.ClickThrough || _mouseHook != IntPtr.Zero) return;
+        _mouseProc = HookProc;
+        _mouseHook = SetWindowsHookEx(WH_MOUSE_LL, _mouseProc, GetModuleHandle(null), 0);
+        if (_mouseHook == IntPtr.Zero) Log.Info("mouse hook install failed");
+    }
+
+    private IntPtr HookProc(int nCode, IntPtr wParam, IntPtr lParam)
+    {
+        if (nCode >= 0)
+        {
+            int msg = (int)wParam;
+            if (msg == WM_MOUSEMOVE || msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP)
+            {
+                var data = Marshal.PtrToStructure<MSLLHOOKSTRUCT>(lParam);
+                if (Form.Bounds.Contains(data.pt))
+                {
+                    var cp = Form.PointToClient(data.pt);
+                    if (msg == WM_LBUTTONUP)
+                    {
+                        if (_swallowUp) { _swallowUp = false; return (IntPtr)1; }
+                    }
+                    else if (msg == WM_LBUTTONDOWN)
+                    {
+                        if (InHitRect(cp))
+                        {
+                            Eval($"window.island&&window.island.hitClick&&window.island.hitClick({Css(cp.X)},{Css(cp.Y)})");
+                            _swallowUp = true;
+                            return (IntPtr)1; // swallow so the click never leaks to the window behind
+                        }
+                    }
+                    else // WM_MOUSEMOVE
+                    {
+                        _hovering = true;
+                        int now = Environment.TickCount;
+                        if (now - _lastHoverTick >= 40)
+                        {
+                            _lastHoverTick = now;
+                            Eval($"window.island&&window.island.hover&&window.island.hover({Css(cp.X)},{Css(cp.Y)})");
+                        }
+                    }
+                }
+                else if (msg == WM_MOUSEMOVE && _hovering)
+                {
+                    _hovering = false;
+                    Eval("window.island&&window.island.hover&&window.island.hover(-1,-1)");
+                }
+            }
+        }
+        return CallNextHookEx(_mouseHook, nCode, wParam, lParam);
+    }
+
+    private bool InHitRect(Point cp)
+    {
+        foreach (var r in Form.HitRects) if (r.Contains(cp)) return true;
+        return false;
+    }
+    private int Css(int devicePx) => (int)Math.Round(devicePx / _dpr);
+    private void Eval(string js) { try { _webView.CoreWebView2?.ExecuteScriptAsync(js); } catch { } }
 
     private void EmitReady()
     {
@@ -408,6 +497,7 @@ sealed class IslandHost : IDisposable
     private void CloseAndExit()
     {
         if (Interlocked.Exchange(ref _exiting, 1) == 1) return;
+        if (_mouseHook != IntPtr.Zero) { try { UnhookWindowsHookEx(_mouseHook); } catch { } _mouseHook = IntPtr.Zero; }
         try { Stdout.Write(new JsonObject { ["type"] = "closed" }); } catch { }
         Environment.Exit(0);
     }
