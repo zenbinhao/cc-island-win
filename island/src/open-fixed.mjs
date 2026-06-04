@@ -69,7 +69,6 @@ class FixedWindow extends EventEmitter {
   send(js)      { this.#write({ type: "eval", js }); }
   setHTML(html) { this.#write({ type: "html", html: Buffer.from(html).toString("base64") }); }
   resize(w, h)  { this.#write({ type: "resize", width: w, height: h }); }
-  activate(ppid) { this.#write({ type: "activate", ppid }); }
   close()       { this.#write({ type: "close" }); }
 }
 

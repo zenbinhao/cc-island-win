@@ -6,7 +6,7 @@
 
 ## 效果预览
 
-当 Claude Code 工作时，屏幕顶部会出现一个半透明的黑色胶囊，显示当前操作状态（如"正在读取文件..."、"执行命令中..."等），操作完成后自动消失。
+当 Claude Code 工作时，屏幕顶部会出现一个半透明的黑色胶囊，显示当前操作状态（如"正在读取文件..."、"执行命令中..."等）；完成后保留为 Done 状态，直到下一次操作把它覆盖。
 
 ### 状态一览
 
@@ -35,6 +35,8 @@
 ```
 
 Agent 会自动完成环境检查、依赖安装、编译和 hooks 配置。
+
+> **在 WSL2 里运行 Claude Code？同样可用。** 灵动岛窗口只在 **Windows 桌面**渲染，但驱动它的 Claude Code 既可跑在 Windows 原生终端、也可跑在 **WSL2**。区别只在 hooks 命令调用哪个 node：Windows 原生用 `node`；WSL2 则换成 `node.exe`（Windows 的 node，WSL interop 可直接调用并原样透传 stdin），bridge 路径用 `C:/…` 形式，例如 `node.exe C:/Users/<你>/.../island/src/bridge.mjs hook`。代价：每个 hook 多一次 interop 冷启动开销；其余行为（多会话堆叠、状态更新）与纯 Windows 一致。
 
 ## 依赖
 
@@ -77,12 +79,13 @@ companion.mjs  (常驻守护进程)
 ## 行为
 
 - **自动启动**: Claude Code 启动时灵动岛自动出现
-- **自动消失**: 操作完成 30 秒后状态行自动移除
+- **状态保留**: done / interrupted / waiting 等状态行保留到该会话下一个事件覆盖（不再定时自动移除）
+- **逐行消除**: 光标移到某行右缘会浮现 × 按钮，点击即从所有屏幕移除该会话行；行只被「下一个事件覆盖」或「× 手动消除」移除，无定时自动消失
+- **收起/展开**: 点击底部小尖尖按钮（▲/▼）手动收起/展开；收起后仅显示按钮（窗口 30px 高）；有新状态更新时自动展开
 - **多会话**: 每个 Claude Code 实例独立显示
 - **永久常驻**: companion 不会自动退出，需手动 `/island kill`
 - **重启恢复**: 电脑重启后下次打开 Claude Code 自动恢复
 - **主题切换**: 支持 `dark` / `pink` / `auto` 三种主题（`/island theme`），偏好持久化到 `~/.claude/claude-island.json`
-- **聚焦跳转**: 鼠标悬停胶囊，每行左侧出现 ↗ 按钮，点击聚焦到对应会话的终端窗口（支持 WezTerm、Windows Terminal、PowerShell、CMD、Git Bash、VSCode 终端）
 
 ## 故障排查
 

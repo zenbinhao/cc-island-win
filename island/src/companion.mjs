@@ -10,7 +10,6 @@
 //   { id, type:"update", project, status, detail, prompt, ctxPct, startedAt, frozenElapsed }
 //   { id, type:"remove" }
 //   { id, type:"scale",   scale:"small"|"medium"|"large"|"xlarge" }
-//   { id, type:"done-retract", delayMs: 5000 }   — auto-remove row after delay
 //   { id, type:"respawn" }
 //
 // Persistent daemon — stays alive until explicitly killed.
@@ -51,7 +50,7 @@ log("info", `companion starting (pid=${process.pid}, platform=${process.platform
 
 // Kill any orphaned native host windows from a previous abnormal exit
 try {
-  execSync("taskkill /F /IM island-host-win.exe 2>nul", { timeout: 3000, stdio: "pipe", windowsHide: true });
+  execSync("taskkill /F /IM island-host-win.exe", { timeout: 3000, stdio: "pipe", windowsHide: true });
   log("info", "cleaned up orphaned island-host-win processes");
 } catch (e) { /* no orphaned processes — expected */ }
 
@@ -92,6 +91,7 @@ function readPref() {
 // ── Window setup ───────────────────────────────────────────────────────
 const WIN_W = 640;
 const WIN_H = 52;
+const WIN_H_COLLAPSED = 30;
 
 const _pref = readPref();
 const SCREEN_PREF = typeof _pref.screen === "string" && _pref.screen.length > 0 ? _pref.screen : "primary";
@@ -118,9 +118,8 @@ log("info", `windows=${screenGeos.length}`);
 // ── Open one window per screen ─────────────────────────────────────────
 // currentRows: id → js string — used to replay state into newly-ready windows
 const currentRows = new Map();
-// sessionTerminal: sessionId → { termType, termId, termPpid } — for focus-button feature
-const sessionTerminal = new Map();
 const wins = [];
+let isCollapsed = false;
 
 const MAX_PENDING = 200;
 const pending = []; // JS strings queued before any window is ready
@@ -165,6 +164,18 @@ for (const geo of screenGeos) {
     log("info", `window ready at (${x},${y}): ${JSON.stringify(info)}`);
     initWindow(w);
   });
+  w.on("message", (data) => {
+    // Handle messages from WebView (collapse button, per-row dismiss)
+    if (!data || typeof data !== "object") return;
+    if (data.action === "collapseChanged") {
+      isCollapsed = data.collapsed;
+      log("info", `collapse state changed: ${isCollapsed}`);
+      syncHeight();
+    } else if (data.type === "dismiss" && typeof data.id === "string" && data.id) {
+      log("info", `dismiss id=${data.id}`);
+      removeRowById(data.id);
+    }
+  });
   w.on("closed", () => {
     log("info", `window closed at (${x},${y})`);
     cleanup();
@@ -172,13 +183,6 @@ for (const geo of screenGeos) {
   });
   w.on("error", (e) => {
     log("error", `window error at (${x},${y}): ${e?.message || e}`);
-  });
-  w.on("message", (data) => {
-    log("debug", `window-msg: ${JSON.stringify(data)}`);
-    if (data?.type === "focus-session" && typeof data.id === "string") {
-      log("info", `focus-session received id=${data.id}`);
-      focusTerminal(data.id);
-    }
   });
 }
 
@@ -193,44 +197,26 @@ try { mkdirSync(PREF_DIR, { recursive: true }); } catch (e) { log("warn", `mkdir
 const clients = new Set();
 const socketIds = new WeakMap();
 const activeRowIds = new Set();
-let idleTimer = null;
-const doneTimers = new Map();
-const ROW_TTL_MS = 120000;
-const rowLastUpdate = new Map();
-
-setInterval(() => {
-  const now = Date.now();
-  for (const [id, ts] of rowLastUpdate) {
-    if (now - ts > ROW_TTL_MS) {
-      log("info", `row TTL expired id=${id}`);
-      rowLastUpdate.delete(id);
-      clearDoneTimer(id);
-      activeRowIds.delete(id);
-      currentRows.delete(id);
-      syncHeight();
-      try { send('window.island.removeRow(' + JSON.stringify(id) + ')'); } catch {}
-    }
-  }
-}, 10000);
 
 function syncHeight() {
-  const h = Math.max(52, activeRowIds.size * 36 + 8);
-  for (const w of wins) { try { w.resize(WIN_W, h); } catch {} }
+  if (isCollapsed) {
+    for (const w of wins) { try { w.resize(WIN_W, WIN_H_COLLAPSED); } catch {} }
+  } else {
+    const h = Math.max(52, activeRowIds.size * 36 + 8);
+    for (const w of wins) { try { w.resize(WIN_W, h); } catch {} }
+  }
 }
 
-function scheduleIdleExit() {
-  if (idleTimer) clearTimeout(idleTimer);
-  idleTimer = setTimeout(() => {
-    log("info", "all clients disconnected, exiting companion");
-    cleanup();
-    process.exit(0);
-  }, 60000); // exit 60s after last client disconnects
+function removeRowById(id) {
+  activeRowIds.delete(id);
+  currentRows.delete(id);
+  syncHeight();
+  send('window.island.removeRow(' + JSON.stringify(id) + ')');
 }
 
 const server = createServer((sock) => {
   clients.add(sock);
   socketIds.set(sock, new Set());
-  if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
   log("info", `client connected (total=${clients.size})`);
 
   const rl = createInterface({ input: sock, crlfDelay: Infinity });
@@ -244,21 +230,15 @@ const server = createServer((sock) => {
 
     if (msg.type === "update") {
       if (!msg.id || !VALID_STATUS.has(msg.status)) return;
-      log("info", `update id=${msg.id} status=${msg.status} project=${msg.project||''} termType=${msg.termType||''} tabIndex=${msg.tabIndex} prompt="${(msg.prompt||'').substring(0,40)}"`);
-      rowLastUpdate.set(msg.id, Date.now());
-      clearDoneTimer(msg.id);
+      log("info", `update id=${msg.id} status=${msg.status} project=${msg.project||''} prompt="${(msg.prompt||'').substring(0,40)}"`);
       activeRowIds.add(msg.id);
-      syncHeight();
-      // Store terminal info for focus-button feature
-      if (msg.termType) {
-        sessionTerminal.set(msg.id, {
-          termType: msg.termType,
-          termId: msg.termId || null,
-          termPpid: msg.termPpid || null,
-          termPid: msg.termPid || null,
-          tabIndex: typeof msg.tabIndex === "number" ? msg.tabIndex : -1,
-        });
+      // Auto-expand when new update arrives
+      if (isCollapsed) {
+        isCollapsed = false;
+        send('window.island.setCollapsed(false)');
+        log("info", "auto-expanded due to new update");
       }
+      syncHeight();
       const js = 'window.island.upsertRow(' + JSON.stringify(msg.id) + ',' + JSON.stringify(msg) + ')';
       currentRows.set(msg.id, js);
       send(js);
@@ -266,19 +246,8 @@ const server = createServer((sock) => {
     }
     if (msg.type === "remove") {
       if (!msg.id) return;
-      clearDoneTimer(msg.id);
-      activeRowIds.delete(msg.id);
-      currentRows.delete(msg.id);
-      syncHeight();
       log("info", `remove id=${msg.id}`);
-      send('window.island.removeRow(' + JSON.stringify(msg.id) + ')');
-      return;
-    }
-    if (msg.type === "done-retract") {
-      if (!msg.id) return;
-      const delay = typeof msg.delayMs === "number" ? msg.delayMs : 5000;
-      log("info", `done-retract id=${msg.id} delay=${delay}ms`);
-      scheduleDoneRetract(msg.id, delay);
+      removeRowById(msg.id);
       return;
     }
     if (msg.type === "scale" && typeof msg.scale === "string") {
@@ -307,30 +276,11 @@ const server = createServer((sock) => {
     const ids = socketIds.get(sock);
     if (ids) socketIds.delete(sock);
     log("info", `client disconnected (total=${clients.size})`);
-    if (clients.size === 0) scheduleIdleExit();
   });
   sock.on("error", (e) => {
     log("warn", `socket error: ${e.message}`);
   });
 });
-
-function clearDoneTimer(id) {
-  const t = doneTimers.get(id);
-  if (t) { clearTimeout(t); doneTimers.delete(id); }
-}
-
-function scheduleDoneRetract(id, delayMs) {
-  clearDoneTimer(id);
-  const t = setTimeout(() => {
-    doneTimers.delete(id);
-    activeRowIds.delete(id);
-    rowLastUpdate.delete(id);
-    currentRows.delete(id);
-    syncHeight();
-    send('window.island.removeRow(' + JSON.stringify(id) + ')');
-  }, delayMs);
-  doneTimers.set(id, t);
-}
 
 server.on("error", (err) => {
   if (err?.code === "EADDRINUSE") {
@@ -347,58 +297,12 @@ server.listen(SOCK, () => {
   log("info", `listening on ${SOCK}`);
 });
 
-// ── Terminal focus (focus-button feature) ──────────────────────────────
-//
-// Window activation is handled by the C# host (island-host-win.exe).
-// It intercepts the focus-session WebMessage (from the WebView focus button
-// click) and calls ActivateWindow(ppid) on the UI thread — where
-// GetForegroundWindow / AttachThreadInput / SetForegroundWindow all work
-// correctly.  Spawning a hidden PowerShell process for SetForegroundWindow
-// is fundamentally broken because GetForegroundWindow() returns 0 from
-// hidden/background processes.
-function focusTerminal(sessionId) {
-  const term = sessionTerminal.get(sessionId);
-  if (!term) {
-    log("warn", `focusTerminal: no terminal info for session ${sessionId}`);
-    return;
-  }
-  log("info", `focusTerminal: session=${sessionId} type=${term.termType} tabIndex=${term.tabIndex} (delegated to C# host)`);
-
-  // Windows Terminal: switch to the correct tab.
-  // NOTE: C# host's ActivateWindow runs synchronously before this handler
-  // (island-host.cs WebMessageReceived → ActivateWindow), so the WT window
-  // is already in the foreground when this tab switch executes.
-  if (term.termType === "windows-terminal" && term.tabIndex >= 0) {
-    try {
-      execSync(`wt -w 0 focus-tab -t ${term.tabIndex}`, {
-        timeout: 3000, stdio: "ignore", windowsHide: true,
-      });
-    } catch (e) {
-      log("warn", `wt focus-tab failed: ${e.message}`);
-    }
-  }
-
-  // WezTerm: activate the specific pane via CLI.
-  // Window activation (restore + foreground) is handled by the C# host.
-  if (term.termType === "wezterm" && term.termId) {
-    try {
-      execSync(`wezterm cli activate-pane --pane-id ${term.termId}`, {
-        timeout: 3000, stdio: "ignore", windowsHide: true,
-      });
-    } catch (e) {
-      log("warn", `wezterm activate-pane failed: ${e.message}`);
-    }
-  }
-}
-
 // ── Cleanup ────────────────────────────────────────────────────────────
 let cleaned = false;
 function cleanup() {
   if (cleaned) return;
   cleaned = true;
   log("info", "cleanup");
-  for (const t of doneTimers.values()) clearTimeout(t);
-  doneTimers.clear();
   try { server.close(); } catch (e) { log("warn", `server.close failed: ${e.message}`); }
   for (const w of wins) { try { w.close(); } catch (e) { log("warn", `win.close failed: ${e.message}`); } }
 }

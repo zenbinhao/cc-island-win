@@ -107,6 +107,24 @@ html, body {
 .meta .mono { font-variant-numeric: tabular-nums; }
 .ctx-warn { color: var(--ctx-warn); }
 .ctx-hot  { color: var(--ctx-hot); }
+.dismiss {
+  position: absolute;
+  right: calc(7px * var(--scale));
+  top: 50%;
+  transform: translateY(-50%);
+  width: calc(16px * var(--scale));
+  height: calc(16px * var(--scale));
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 50%;
+  font-size: calc(13px * var(--scale)); line-height: 1;
+  color: var(--detail-color);
+  background: rgba(255,255,255,0.12);
+  cursor: pointer; pointer-events: auto;
+  opacity: 0;
+  transition: opacity 140ms ease, background 140ms ease;
+}
+.row.hovered .dismiss { opacity: 0.9; }
+.row.hovered .slot.right { opacity: 0.3; margin-right: calc(20px * var(--scale)); transition: opacity 140ms ease, margin-right 140ms ease; }
 
 /* ── Dark theme animations (default) ─────────────────────────────── */
 @keyframes pulse-waiting {
@@ -237,41 +255,62 @@ body.theme-pink .row[data-status="done"] .braille {
   }
 }
 
-/* ── Row wrapper (button lives here, outside the clipping row) ──── */
+/* ── Row wrapper (carries per-row separator border + bottom radius) ──── */
 .row-wrap {
   position: relative;
   width: calc(460px * var(--scale));
 }
 
 #stack { opacity: 1; }
-body.island-hover .row { opacity: 0.06; transition: opacity 200ms ease; }
 
-/* ── Focus button ────────────────────────────────────────────────── */
-.focus-btn {
-  position: absolute;
-  left: calc(-46px * var(--scale));
-  top: calc(5px * var(--scale));
-  width: calc(24px * var(--scale));
-  height: calc(24px * var(--scale));
-  border-radius: 50%;
-  background: rgba(30,30,30,0.55);
-  border: 1px solid rgba(255,255,255,0.45); box-shadow: 0 1px 4px rgba(0,0,0,0.35);
-  opacity: 0; transition: opacity 180ms ease, background 150ms ease, box-shadow 150ms ease;
+/* ── Collapse toggle button ──────────────────────────────────────────── */
+#collapse-btn {
+  position: fixed;
+  bottom: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  width: calc(40px * var(--scale));
+  height: calc(30px * var(--scale));
+  display: flex;
+  align-items: center;
+  justify-content: center;
   cursor: pointer;
-  font-size: calc(11px * var(--scale)); color: rgba(255,255,255,0.9); font-weight: 600;
-  display: flex; align-items: center; justify-content: center;
-  pointer-events: none;
-  z-index: 10;
+  background: transparent;
+  border: none;
+  padding: 0;
+  z-index: 1000;
+  pointer-events: auto;
+  transition: opacity 200ms ease;
 }
-body.island-hover .focus-btn { opacity: 1; pointer-events: auto; }
-.focus-btn:hover { background: rgba(50,50,50,0.75); border-color: rgba(255,255,255,0.7); box-shadow: 0 2px 8px rgba(0,0,0,0.5); }
+#collapse-btn:hover { opacity: 0.7; }
+#collapse-btn svg {
+  width: calc(16px * var(--scale));
+  height: calc(16px * var(--scale));
+  fill: var(--project-color);
+  transition: transform 300ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+body.collapsed #collapse-btn svg {
+  transform: rotate(180deg);
+}
 
-body.theme-pink .focus-btn { background: rgba(50,18,30,0.55); border-color: rgba(255,200,210,0.5); color: rgba(255,220,230,0.92); box-shadow: 0 1px 4px rgba(0,0,0,0.3); }
-body.theme-pink .focus-btn:hover { background: rgba(70,25,40,0.75); border-color: rgba(255,200,210,0.75); box-shadow: 0 2px 8px rgba(0,0,0,0.45); }
+/* ── Collapsed state ─────────────────────────────────────────────────── */
+body.collapsed #stack {
+  opacity: 0;
+  pointer-events: none;
+  max-height: 0;
+  overflow: hidden;
+  transition: opacity 300ms cubic-bezier(0.32, 0.72, 0, 1),
+              max-height 300ms cubic-bezier(0.32, 0.72, 0, 1);
+}
 </style>
 </head>
 <body>
 <div id="stack"></div>
+<button id="collapse-btn" aria-label="Toggle collapse">
+  <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+    <path d="M8 4 L12 10 L4 10 Z"/>
+  </svg>
+</button>
 <script>
 (function () {
   var stack = document.getElementById('stack');
@@ -320,6 +359,7 @@ body.theme-pink .focus-btn:hover { background: rgba(70,25,40,0.75); border-color
   var tickerB = null, tickerT = null;
 
   var SCALES = { small: 0.88, medium: 1.0, large: 1.18, xlarge: 1.35 };
+  var curScaleFactor = SCALES.medium;
 
   function esc(s) { return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
@@ -386,29 +426,25 @@ body.theme-pink .focus-btn:hover { background: rgba(70,25,40,0.75); border-color
     }
     row.el.dataset.spin = s.spin?'true':'false';
     row.el.dataset.status = d.status;
-    row.el.innerHTML = '<div class="slot left">'+left+'</div><div class="slot mid">'+mid+'</div><div class="slot right">'+right+'</div>';
+    var dismiss = '<div class="dismiss" data-id="'+esc(row.id)+'">&times;</div>';
+    row.el.innerHTML = '<div class="slot left">'+left+'</div><div class="slot mid">'+mid+'</div><div class="slot right">'+right+'</div>'+dismiss;
   }
 
   function upsertRow(id, data) {
     var existing = rows[id];
     if (existing && !existing.removing) {
       existing.data = Object.assign({}, existing.data, data);
-      // Update ppid on existing button — prefer termPid (terminal PID) over
-      // termPpid (bridge parent PID, which may be a short-lived hook shell).
-      var eb = existing.wrap.querySelector('.focus-btn');
-      if (eb && (data.termPid != null || data.termPpid != null)) eb.setAttribute('data-ppid', data.termPid || data.termPpid || '');
       renderRowContent(existing); startTickers(); return;
     }
     var wrap = document.createElement('div'); wrap.className = 'row-wrap';
-    var btn = document.createElement('button'); btn.className = 'focus-btn'; btn.setAttribute('data-id', id); btn.setAttribute('data-ppid', data.termPid || data.termPpid || ''); btn.textContent = '↗';
     var el = document.createElement('div'); el.className = 'row'; el.setAttribute('data-id', id);
-    wrap.appendChild(btn);
     wrap.appendChild(el);
     var row = { id: id, data: Object.assign({}, data), el: el, wrap: wrap, removing: false };
     if (!row.data.startedAt) row.data.startedAt = Date.now();
     rows[id] = row; order.push(id); stack.appendChild(wrap);
     renderRowContent(row);
     requestAnimationFrame(function () { requestAnimationFrame(function () { el.classList.add('visible'); }); });
+    scheduleReport();
     startTickers();
   }
 
@@ -416,9 +452,10 @@ body.theme-pink .focus-btn:hover { background: rgba(70,25,40,0.75); border-color
     var row = rows[id]; if (!row||row.removing) return;
     row.removing = true; row.el.classList.remove('visible');
     setTimeout(function () { if (row.wrap.parentNode) row.wrap.parentNode.removeChild(row.wrap); delete rows[id]; var i=order.indexOf(id); if(i>=0)order.splice(i,1); }, 340);
+    scheduleReport();
   }
 
-  function setScale(scale) { var factor=SCALES[scale]; if(factor==null)factor=SCALES.medium; document.documentElement.style.setProperty('--scale',String(factor)); }
+  function setScale(scale) { var factor=SCALES[scale]; if(factor==null)factor=SCALES.medium; curScaleFactor=factor; document.documentElement.style.setProperty('--scale',String(factor)); scheduleReport(); }
 
   function setTheme(theme) {
     document.body.classList.remove('theme-dark', 'theme-pink', 'theme-auto');
@@ -440,20 +477,104 @@ body.theme-pink .focus-btn:hover { background: rgba(70,25,40,0.75); border-color
     });
   }
 
-  window.island = { upsertRow:upsertRow, removeRow:removeRow, setScale:setScale, setTheme:setTheme };
+  // ── Collapse state management ─────────────────────────────────────────
+  var collapsed = false;
 
-  // Focus button: send session id + ppid so the native host can activate the
-  // terminal window in the same event handler (avoids foreground-lock round-trip).
-  stack.addEventListener('click', function(e) {
-    var btn = e.target.closest('.focus-btn');
-    if (!btn) return;
-    e.stopPropagation();
-    var id = btn.getAttribute('data-id');
-    var ppid = parseInt(btn.getAttribute('data-ppid'), 10) || 0;
-    if (id && window.islandHost) {
-      window.islandHost.send({ type: 'focus-session', id: id, ppid: ppid });
+  function setCollapsed(state) {
+    collapsed = state;
+    if (collapsed) {
+      document.body.classList.add('collapsed');
+    } else {
+      document.body.classList.remove('collapsed');
     }
-  });
+    scheduleReport();
+  }
+
+  function toggleCollapse() {
+    setCollapsed(!collapsed);
+    // Notify companion about state change
+    if (window.islandHost && window.islandHost.send) {
+      window.islandHost.send({ action: 'collapseChanged', collapsed: collapsed });
+    }
+  }
+
+  // ── Collapse button click handler ──────────────────────────────────────
+  var collapseBtn = document.getElementById('collapse-btn');
+  if (collapseBtn) {
+    collapseBtn.addEventListener('click', function(e) {
+      e.stopPropagation();
+      toggleCollapse();
+    });
+  }
+
+  // ── Hit rects (× strip + collapse button) reported to native host ──────
+  function reportHitRects() {
+    if (!window.islandHost || !window.islandHost.send) return;
+    var dpr = window.devicePixelRatio || 1;
+    var rects = [];
+    var cb = document.getElementById('collapse-btn');
+    if (cb) {
+      var cr = cb.getBoundingClientRect();
+      if (cr.width > 0 && cr.height > 0) rects.push({ x:cr.left, y:cr.top, w:cr.width, h:cr.height });
+    }
+    if (!collapsed) {
+      var wraps = stack.children;
+      if (wraps.length > 0) {
+        var first = wraps[0].getBoundingClientRect();
+        var last  = wraps[wraps.length-1].getBoundingClientRect();
+        var stripW = 34 * curScaleFactor;
+        rects.push({ x: first.right - stripW, y: first.top, w: stripW, h: last.bottom - first.top });
+      }
+    }
+    window.islandHost.send({ type:'hitrects', rects:rects, dpr:dpr });
+  }
+
+  var reportTimer = null;
+  function scheduleReport() {
+    reportHitRects();
+    if (reportTimer) clearTimeout(reportTimer);
+    reportTimer = setTimeout(reportHitRects, 360);
+  }
+
+  // ── Interaction driven by the native WH_MOUSE_LL hook ──────────────────
+  // The window is click-through at the compositor level, so DOM never receives
+  // real mouse events. The host forwards cursor coords (CSS px) here instead:
+  //   hover(x,y)    — reveal × on the row under the cursor (replaces CSS :hover)
+  //   hitClick(x,y) — a click landed inside a reported hit rect; act on it
+  function dismissRow(id) {
+    if (!id) return;
+    if (window.islandHost && window.islandHost.send) window.islandHost.send({ type:'dismiss', id:id });
+    removeRow(id);   // optimistic; companion 的 removeRow 广播是幂等的
+  }
+
+  var _hoverRow = null;
+  function hover(x, y) {
+    var el = (x >= 0 && y >= 0) ? document.elementFromPoint(x, y) : null;
+    var row = (el && el.closest) ? el.closest('.row') : null;
+    if (row === _hoverRow) return;
+    if (_hoverRow) _hoverRow.classList.remove('hovered');
+    _hoverRow = row;
+    if (row) row.classList.add('hovered');
+  }
+
+  function hitClick(x, y) {
+    var el = document.elementFromPoint(x, y);
+    if (!el || !el.closest) return;
+    if (el.closest('#collapse-btn')) { toggleCollapse(); return; }
+    var row = el.closest('.row');
+    if (row) dismissRow(row.getAttribute('data-id'));
+  }
+
+  window.island = {
+    upsertRow: upsertRow,
+    removeRow: removeRow,
+    setScale: setScale,
+    setTheme: setTheme,
+    setCollapsed: setCollapsed,
+    toggleCollapse: toggleCollapse,
+    hover: hover,
+    hitClick: hitClick
+  };
 })();
 </script>
 </body>

@@ -13,7 +13,7 @@ description: >
 
 # 灵动岛 (Dynamic Island) for Claude Code
 
-配置一个电脑桌面级灵动岛风格的状态胶囊，固定在屏幕顶部，实时显示 Claude Code 当前正在做什么，并支持跳转对应窗口
+配置一个电脑桌面级灵动岛风格的状态胶囊，固定在屏幕顶部，实时显示 Claude Code 当前正在做什么
 
 - **Windows**: 屏幕顶部居中胶囊，WinForms + WebView2
 
@@ -60,6 +60,18 @@ companion.mjs  (常驻守护进程，永不自动退出)
 | **WebView2 Runtime** | Windows：渲染胶囊 HTML | Windows 10+ 已内置，Win10 LTSC 需手动安装 |
 
 预编译 exe（`src/hosts/windows/island-host-win.exe`）已内置在 skill 目录中，**绝大多数用户无需安装任何编译工具**，如未找到，请重新核实目录是否正确，路径或转义是否正确解析，只需 .NET Desktop Runtime 8.0 即可运行。
+
+### Claude Code 运行在 WSL2 时
+
+灵动岛 UI 只在 Windows 桌面渲染，但 Claude Code 的宿主可以是 WSL2。此时 **hook 命令必须用 Windows 的 node（`node.exe`），不能用 WSL 的 Linux node**——后者连不上 Windows 命名管道、`platform.mjs` 也只认 `win32`。
+
+配置 hooks 时（WSL 的 `~/.claude/settings.json`，如 `/root/.claude/settings.json`），把命令里的 `node` 换成 `node.exe`，bridge 路径用 Windows 形式 `C:/…`：
+
+```json
+"SessionStart": [{"matcher":"","hooks":[{"type":"command","command":"node.exe C:/Users/<你>/.../island/src/bridge.mjs on"}]}]
+```
+
+其余 6 个 hook 同理改用 `node.exe ... bridge.mjs hook`。`node.exe` 在 WSL 默认 PATH 内可直接调用，interop 会把 hook 的 stdin JSON 原样透传到 Windows node（含中文 / emoji，已实测无损；终端经 `WT_SESSION` 仍识别为 `windows-terminal`）。代价：每个 hook 多一次 interop 冷启动（约 1~2 秒）。状态文件统一落在 Windows 侧 `C:\Users\<你>\.claude`，与 Windows 原生会话共享、按 session 堆叠不串。
 
 ---
 
@@ -274,8 +286,9 @@ node ~/.claude/skills/island/src/bridge.mjs status
 
 - **自动启动**: Claude Code 启动时（SessionStart hook），灵动岛自动出现。
 - **自动出现**: 发送消息后，状态行立即显示（UserPromptSubmit hook）。
-- **自动消失**: 正常完成 30 秒后状态行自动移除（done-retract）；Ctrl+C 中断 30 秒后显示 "interrupted" 并移除。
-- **兜底清理**: 120 秒无更新的行自动移除（防止异常终止后残留）。
+- **状态保留**: done（完成）、interrupted（中断）、waiting（等待确认）等状态行不再定时自动移除——会一直保留到该会话的下一个事件把它覆盖（例如完成后再次发消息翻回「思考中」）。多 pane 下灵动岛即一块持续的会话状态看板。
+- **逐行消除**: 光标移到某行右缘会浮现 × 按钮，点击即从所有屏幕移除该会话行；行只被「下一个事件覆盖」或「× 手动消除」移除，无定时自动消失。整窗关闭仍用 `/island kill`。
+- **收起/展开**: 点击底部中间的小尖尖按钮（▲ 收起 / ▼ 展开）可手动收起灵动岛。收起后窗口缩小至 30px 高度，仅显示按钮；有新状态更新时自动展开。状态为内存态，不持久化。
 - **多会话**: 每个 Claude Code 实例有独立的 sessionId，灵动岛会堆叠显示各行。
 - **永久常驻**: companion 不会自动退出，灵动岛窗口在屏幕顶部持续显示。关闭需用 `/island kill`。
 - **重启恢复**: 电脑重启后，下次打开 Claude Code 时 SessionStart hook 自动启动灵动岛，无需手动操作。
@@ -283,7 +296,6 @@ node ~/.claude/skills/island/src/bridge.mjs status
 - **偏好设置**: `~/.claude/claude-island.json`（enabled, scale, screen, theme）
 - **会话状态**: `~/.claude/claude-island-state.json`（`_sessionData` 按 session_id 隔离各会话）
 - **PID 文件**: `~/.claude/claude-island.pid`（用于精确进程管理）
-- **聚焦按钮**: 鼠标悬停在灵动岛上时，每行左侧出现 ↗ 圆形按钮，点击可聚焦到对应 session 的终端窗口。支持 WezTerm、Windows Terminal、PowerShell、CMD、Git Bash、VSCode 终端。
 - **主题切换**: 支持 dark（默认黑色）、pink（马卡龙粉）、auto（跟随系统）三种主题，通过 `/island theme` 切换。
 
 当灵动岛需要更新时，应当在一次命令中杀掉已有的灵动岛进程并进行更新，避免多次命令间hook重启旧灵动岛程序。
