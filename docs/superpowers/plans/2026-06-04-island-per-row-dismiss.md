@@ -1,112 +1,86 @@
-# 灵动岛逐行手动消除（hover ×）+ 删除 idle-exit 实现计划
+# 灵动岛逐行手动消除（hover ×）+ 完成 idle-exit 移除 实现计划
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 灵动岛窗口改为永久常驻（删 60s idle-exit），并为每行加一个 hover 才显的 × 按钮，点击只消除该会话行。
+**Goal:** 为灵动岛每行加一个 hover 才显的 × 按钮（点击只消除该会话行），并顺带修两个并发「收起/展开」功能引入的问题：① 残留的 idle-exit 调用点导致 companion 崩溃；② 收起按钮无 hit-test 而点不动。
 
-**Architecture:** 复用现有四层管道。× 点击经 `window.islandHost.send` → C# host（`WebMessageReceived` 按 `type` 分流：`hitrects` host 本地消费供 `WM_NCHITTEST` 抠洞，`dismiss` 转发 stdout）→ `open-fixed` 的 `w.on("message")` → companion 删除状态并向所有窗口广播 `removeRow`。命中只放行胶囊右缘一条竖带（每窗 1 个由 WebView 上报的矩形），其余仍点击穿透。
+**Architecture:** 复用四层管道。× 点击经 `window.islandHost.send({type:"dismiss",id})` → C# host（`WebMessageReceived` 按 `type` 分流：`hitrects` host 本地消费供 `WM_NCHITTEST` 抠洞，其余转发 stdout）→ `open-fixed` 的 `w.on("message")` → companion **扩展现有** handler 加 `dismiss` 分支 → `removeRowById` 向所有窗口广播 `removeRow`。命中放行两类矩形：**收起按钮 + 逐行 × 右缘竖带**（WebView 上报，收起态只报按钮）。
 
 **Tech Stack:** Node.js（companion / open-fixed / island.html 生成）、C# WinForms + WebView2（island-host）、.NET 8 SDK 重编 exe。
 
-**约定（来自仓库 CLAUDE.md）：** 分支上工作；提交信息说明改了什么并以 `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>` 结尾；行为变更同步 README/SKILL/CHANGELOG。
+**⚠️ 并发协调（必读）：** 另一实例已在 plan 提交后落地「收起/展开」（commits `ce16612`…`1ea4c8e`）。后果：(a) **当前 HEAD 是坏的**——idle-exit 的声明/函数已被删但漏删两个调用点（`companion.mjs:209`/`:272`），引用已不存在的 `idleTimer`/`scheduleIdleExit` → `ReferenceError` → companion 一连接就崩；(b) 收起按钮**点不动**（`island-host.cs` 没动、整窗仍穿透）；(c) companion 已有 `w.on("message")`（处理 collapse）→ 本计划**扩展**它而非新增。所有 old_string 已对齐当前真实文件。
 
-**测试现实：** 本次改动落在守护进程 / 原生窗口 / HTML，`island-test.mjs`（驱动 bridge stdin→状态）覆盖不到 hover/点击/hit-test/DPI。自动化护栏 = `node --check`（语法）+ `node island/src/island-test.mjs`（回归，本次不改 bridge，应保持 13/0）。GUI 行为由**人在 Windows 实跑**确认，相关步骤标 **[HITL]**——agent 无法替用户移动鼠标 / 观察 hover。
+**约定（CLAUDE.md，已更新）：** 在 `*-dev` 分支工作；提交信息说明改了什么、以 `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>` 结尾；**验证完成后直接 push 到远端 `0.0.1-dev`，master 仅用户操作**；行为变更同步 README/SKILL/CHANGELOG。
 
----
-
-## 前置条件
-
-- [ ] **Step 0: 确认 .NET 8 SDK（Windows 侧）**
-
-Run（Windows）: `dotnet --list-sdks`
-Expected: 至少一行 `8.x.x`。若无：`winget install Microsoft.DotNet.SDK.8` 后重开终端。
-（没有 SDK 则 Task 2 的重编 exe 无法进行。）
+**测试现实：** 改动落在守护进程 / 原生窗口 / HTML，`island-test.mjs` 覆盖不到 hover/点击/hit-test/DPI（且 `--check` 查不出 Task 1 那种运行时 `ReferenceError`）。自动化护栏 = `node --check` + `node island/src/island-test.mjs`（应保持 13/0）。GUI 行为由**人在 Windows 实跑**确认，相关步骤标 **[HITL]**。
 
 ---
 
-## Task 1: companion 删除 60s idle-exit
+## 前置条件（已满足）
+
+- [ ] **Step 0: .NET 8 SDK** — 已确认 Windows 侧 `dotnet --list-sdks` 为 `8.0.421`，可重编 exe。无需安装。
+
+---
+
+## Task 1: 修复残留 idle-exit 调用点（崩溃修复 + 完成永久常驻）
+
+**说明：** idle-exit 的 `let idleTimer` 声明与 `scheduleIdleExit()` 函数已被收起改动删除，但漏删两个调用点，引用已不存在的符号导致 `ReferenceError` 崩溃。本任务删掉这两行残留即可。
 
 **Files:**
-- Modify: `island/src/companion.mjs`（删 `idleTimer` / `scheduleIdleExit` / 两处调用）
+- Modify: `island/src/companion.mjs`（删 2 行残留）
 
-- [ ] **Step 1: 删除 `idleTimer` 声明**
+- [ ] **Step 1: 删除连接处理器里的残留**
 
-把 `island/src/companion.mjs` 中这一行删掉：
-
-```js
-let idleTimer = null;
-```
-
-（它在 `const activeRowIds = new Set();` 下一行。删除后保留上面的 `activeRowIds`。）
-
-- [ ] **Step 2: 删除 `scheduleIdleExit` 函数**
-
-删掉整段：
-
-```js
-function scheduleIdleExit() {
-  if (idleTimer) clearTimeout(idleTimer);
-  idleTimer = setTimeout(() => {
-    log("info", "all clients disconnected, exiting companion");
-    cleanup();
-    process.exit(0);
-  }, 60000); // exit 60s after last client disconnects
-}
-```
-
-- [ ] **Step 3: 删除 server 连接处理器里清 timer 的那行**
-
-在 `const server = createServer((sock) => {` 内部，删掉：
+在 `island/src/companion.mjs` 的 `const server = createServer((sock) => {` 内部，删掉这一行（当前在 `socketIds.set(sock, new Set());` 与 `log("info", \`client connected ...\`)` 之间）：
 
 ```js
   if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
 ```
 
-（保留它上面的 `socketIds.set(sock, new Set());` 和下面的 `log("info", \`client connected ...\`);`。）
+- [ ] **Step 2: 删除 sock.close 里的残留**
 
-- [ ] **Step 4: 删除 `sock.on("close")` 里的 idle 调度**
-
-在 `sock.on("close", () => {` 内部，删掉：
+在 `sock.on("close", () => {` 内部，删掉这一行（当前在 `log("info", \`client disconnected (total=${clients.size})\`)` 之后、是该回调最后一条语句）：
 
 ```js
     if (clients.size === 0) scheduleIdleExit();
 ```
 
-（保留它上面的 `log("info", \`client disconnected (total=${clients.size})\`);`。）
-
-- [ ] **Step 5: 确认无残留引用**
+- [ ] **Step 3: 确认无残留引用**
 
 Run: `grep -n "idleTimer\|scheduleIdleExit" island/src/companion.mjs`
 Expected: 无输出（exit code 1）。
 
-- [ ] **Step 6: 语法 + 回归**
+- [ ] **Step 4: 语法 + 回归**
 
 Run: `node --check island/src/companion.mjs && node island/src/island-test.mjs`
-Expected: `--check` 无输出；island-test 结尾打印 13 passed / 0 failed（退出码 0）。
+Expected: `--check` 无输出；island-test 结尾 13 passed / 0 failed（退出码 0）。
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add island/src/companion.mjs
-git commit -m "refactor: 删除 60s idle-exit，灵动岛窗口永久常驻
+git add island/src/companion.mjs && git commit -m "fix: 删除收起改动遗留的 idle-exit 调用点（修 companion 崩溃）
 
-companion 不再在所有 socket 客户端断开 60s 后自杀，回归 README/SKILL/
-顶部注释一直声称的『永久常驻』。整窗关闭仍由 /island kill 负责。
+收起/展开改动删掉了 idleTimer 声明与 scheduleIdleExit() 函数，却漏删
+companion.mjs 中两个调用点（连接处理器、sock.close），引用已不存在的符号
+→ ReferenceError → companion 一连接即崩。删除残留两行，完成 idle-exit 移除，
+窗口真正永久常驻，整窗关闭仍由 /island kill 负责。
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ```
 
+- [ ] **Step 6: 自检** — `git diff HEAD~1 -- island/src/companion.mjs` 应只删这两行，别无改动。
+
 ---
 
-## Task 2: 逐行 × 可点 spike（× 常显，先打通链路）
+## Task 2: 逐行 × 可点 + 收起按钮可点 spike（× 常显，打通链路）
 
-**目的：** 在加 hover 美化前，先用「常显 ×」隔离验证三件事——命中条放行点击、点击触发 DOM onclick、dismiss 经 host 回到 companion 并跨窗删行。这是头号风险，必须先过。
+**目的：** 先用「常显 ×」隔离验证头号风险——命中区放行点击、点击触发 DOM onclick、消息回到 companion。这一步同时让**收起按钮也变可点**（hitrects 含其矩形）。hover 美化放 Task 3。
 
 **Files:**
 - Modify: `island/src/hosts/windows/island-host.cs`（HitRects + WM_NCHITTEST + WebMessage 分流）
 - Build: `island/src/hosts/windows/island-host-win.{exe,dll,deps.json,runtimeconfig.json}`（重编产物）
-- Modify: `island/src/island.html.mjs`（× DOM + 命中条上报 + 点击委托）
-- Modify: `island/src/companion.mjs`（抽 `removeRowById` + `w.on("message")`）
+- Modify: `island/src/island.html.mjs`（× DOM + hitrects 上报 + 点击委托）
+- Modify: `island/src/companion.mjs`（抽 `removeRowById` + 扩展 `w.on("message")`）
 
 - [ ] **Step 1: host — IslandForm 增加命中矩形字段与 HTCLIENT 常量**
 
@@ -129,7 +103,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
     public Rectangle[] HitRects = Array.Empty<Rectangle>();
 ```
 
-- [ ] **Step 2: host — WM_NCHITTEST 改为按命中条放行**
+- [ ] **Step 2: host — WM_NCHITTEST 改为按命中矩形放行**
 
 把 `WndProc` 里这段：
 
@@ -147,7 +121,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ```csharp
         if (m.Msg == WM_NCHITTEST && HitTestEnabled)
         {
-            // Click-through everywhere EXCEPT the reported hit rects (the × strip).
+            // Click-through everywhere EXCEPT the reported hit rects (× strip + collapse btn).
             var rects = HitRects;
             if (rects.Length > 0)
             {
@@ -195,7 +169,8 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
                 if (msg?["__islandHost_close"]?.GetValue<bool>() == true)
                 { CloseAndExit(); return; }
 
-                // hit rects are consumed locally (for WM_NCHITTEST), not forwarded
+                // hit rects are consumed locally (for WM_NCHITTEST), not forwarded.
+                // Everything else (dismiss, collapseChanged) is forwarded to companion.
                 if (msg?["type"]?.GetValue<string>() == "hitrects")
                 { UpdateHitRects(msg!); return; }
 
@@ -232,15 +207,14 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 （`List<>`/`Rectangle`/`Math`/`Array` 在 `ImplicitUsings=enable` + `System.Drawing` 下均可用，无需加 using。）
 
-- [ ] **Step 5: [HITL/Windows] 重编 exe**
+- [ ] **Step 5: [Windows] 重编 exe**
 
-Run（Windows，仓库根）: `node island/src/build.mjs`
+Run（Windows，仓库根；agent 可经 WSL interop 用 `node.exe`）: `node island/src/build.mjs`（或 `node.exe island/src/build.mjs`）
 Expected: 末行 `[claude-island] Built: ...island-host-win.exe`（退出码 0）。
-失败排查：若报 `.NET 8 SDK not found` → 回到 Step 0 装 SDK。
 
 - [ ] **Step 6: html — 渲染每行的 × 元素（spike 常显）**
 
-在 `island/src/island.html.mjs` 的 `<style>` 里，`.meta` 规则之后加：
+在 `island/src/island.html.mjs` 的 `<style>` 里，`.ctx-hot  { color: var(--ctx-hot); }` 之后（`.meta` 规则区结束处）加：
 
 ```css
 .dismiss {
@@ -272,50 +246,27 @@ Expected: 末行 `[claude-island] Built: ...island-host-win.exe`（退出码 0�
     row.el.innerHTML = '<div class="slot left">'+left+'</div><div class="slot mid">'+mid+'</div><div class="slot right">'+right+'</div>'+dismiss;
 ```
 
-- [ ] **Step 7: html — 命中条上报 + 点击委托**
+- [ ] **Step 7: html — scale 因子追踪 + 上报接入**
 
-在 IIFE 里 `var SCALES = ...;` 之后加一个 scale 因子追踪变量：
+把 `var SCALES = { small: 0.88, medium: 1.0, large: 1.18, xlarge: 1.35 };` 这一行后面加一行：
 
 ```js
   var curScaleFactor = SCALES.medium;
 ```
 
-在 `setScale` 函数体内，`var factor=SCALES[scale]; if(factor==null)factor=SCALES.medium;` 之后加：
+把 `setScale` 整行：
 
 ```js
-    curScaleFactor = factor;
+  function setScale(scale) { var factor=SCALES[scale]; if(factor==null)factor=SCALES.medium; document.documentElement.style.setProperty('--scale',String(factor)); }
 ```
 
-并在 `setScale` 末尾（设置完 `--scale` 之后）加：
+改为：
 
 ```js
-    scheduleReport();
+  function setScale(scale) { var factor=SCALES[scale]; if(factor==null)factor=SCALES.medium; curScaleFactor=factor; document.documentElement.style.setProperty('--scale',String(factor)); scheduleReport(); }
 ```
 
-在 `removeRow` 之后、`setScale` 之前，新增两个函数：
-
-```js
-  function reportHitRects() {
-    if (!window.islandHost || !window.islandHost.send) return;
-    var dpr = window.devicePixelRatio || 1;
-    var wraps = stack.children;
-    if (wraps.length === 0) { window.islandHost.send({ type:'hitrects', rects:[], dpr:dpr }); return; }
-    var first = wraps[0].getBoundingClientRect();
-    var last  = wraps[wraps.length-1].getBoundingClientRect();
-    var stripW = 34 * curScaleFactor;
-    var rect = { x: first.right - stripW, y: first.top, w: stripW, h: last.bottom - first.top };
-    window.islandHost.send({ type:'hitrects', rects:[rect], dpr:dpr });
-  }
-
-  var reportTimer = null;
-  function scheduleReport() {
-    reportHitRects();
-    if (reportTimer) clearTimeout(reportTimer);
-    reportTimer = setTimeout(reportHitRects, 360);
-  }
-```
-
-在 `upsertRow` 的**新行分支**末尾（`startTickers();` 之前的 `requestAnimationFrame(...)` 之后）加 `scheduleReport();`，即把：
+在 `upsertRow` 新行分支，把：
 
 ```js
     requestAnimationFrame(function () { requestAnimationFrame(function () { el.classList.add('visible'); }); });
@@ -330,15 +281,89 @@ Expected: 末行 `[claude-island] Built: ...island-host-win.exe`（退出码 0�
     startTickers();
 ```
 
-在 `removeRow` 函数体末尾（`setTimeout(...)` 那行之后）加：
+把 `removeRow` 整个函数：
 
 ```js
-    scheduleReport();
+  function removeRow(id) {
+    var row = rows[id]; if (!row||row.removing) return;
+    row.removing = true; row.el.classList.remove('visible');
+    setTimeout(function () { if (row.wrap.parentNode) row.wrap.parentNode.removeChild(row.wrap); delete rows[id]; var i=order.indexOf(id); if(i>=0)order.splice(i,1); }, 340);
+  }
 ```
 
-在 `window.island = {...}` 那一行之前，挂上点击委托：
+改为（末尾加 `scheduleReport()`）：
 
 ```js
+  function removeRow(id) {
+    var row = rows[id]; if (!row||row.removing) return;
+    row.removing = true; row.el.classList.remove('visible');
+    setTimeout(function () { if (row.wrap.parentNode) row.wrap.parentNode.removeChild(row.wrap); delete rows[id]; var i=order.indexOf(id); if(i>=0)order.splice(i,1); }, 340);
+    scheduleReport();
+  }
+```
+
+- [ ] **Step 8: html — setCollapsed 末尾接入上报 + 点击委托 + reportHitRects/scheduleReport**
+
+把 `setCollapsed` 整个函数：
+
+```js
+  function setCollapsed(state) {
+    collapsed = state;
+    if (collapsed) {
+      document.body.classList.add('collapsed');
+    } else {
+      document.body.classList.remove('collapsed');
+    }
+  }
+```
+
+改为（末尾加 `scheduleReport()`）：
+
+```js
+  function setCollapsed(state) {
+    collapsed = state;
+    if (collapsed) {
+      document.body.classList.add('collapsed');
+    } else {
+      document.body.classList.remove('collapsed');
+    }
+    scheduleReport();
+  }
+```
+
+在 `window.island = {` 这一行**之前**，插入上报函数 + 点击委托（此处 `collapsed`、`stack`、`removeRow`、`#collapse-btn` 均已在作用域内）：
+
+```js
+  // ── Hit rects (× strip + collapse button) reported to native host ──────
+  function reportHitRects() {
+    if (!window.islandHost || !window.islandHost.send) return;
+    var dpr = window.devicePixelRatio || 1;
+    var rects = [];
+    var cb = document.getElementById('collapse-btn');
+    if (cb) {
+      var cr = cb.getBoundingClientRect();
+      if (cr.width > 0 && cr.height > 0) rects.push({ x:cr.left, y:cr.top, w:cr.width, h:cr.height });
+    }
+    if (!collapsed) {
+      var wraps = stack.children;
+      if (wraps.length > 0) {
+        var first = wraps[0].getBoundingClientRect();
+        var last  = wraps[wraps.length-1].getBoundingClientRect();
+        var stripW = 34 * curScaleFactor;
+        rects.push({ x: first.right - stripW, y: first.top, w: stripW, h: last.bottom - first.top });
+      }
+    }
+    window.islandHost.send({ type:'hitrects', rects:rects, dpr:dpr });
+  }
+
+  var reportTimer = null;
+  function scheduleReport() {
+    reportHitRects();
+    if (reportTimer) clearTimeout(reportTimer);
+    reportTimer = setTimeout(reportHitRects, 360);
+  }
+
+  // ── Per-row × dismiss (delegated click; only hittable on the right-edge strip) ──
   stack.addEventListener('click', function (e) {
     var btn = e.target && e.target.closest ? e.target.closest('.dismiss') : null;
     if (!btn) return;
@@ -347,11 +372,12 @@ Expected: 末行 `[claude-island] Built: ...island-host-win.exe`（退出码 0�
     if (window.islandHost && window.islandHost.send) window.islandHost.send({ type:'dismiss', id:id });
     removeRow(id);   // optimistic; companion 的 removeRow 广播是幂等的
   });
+
 ```
 
-- [ ] **Step 8: companion — 抽出 removeRowById 并复用**
+- [ ] **Step 9: companion — 抽出 removeRowById 并复用**
 
-在 `island/src/companion.mjs` 的 `syncHeight` 函数之后，新增：
+在 `island/src/companion.mjs` 的 `syncHeight` 函数（`function syncHeight() { ... }`）**之后**，新增：
 
 ```js
 function removeRowById(id) {
@@ -387,48 +413,61 @@ function removeRowById(id) {
     }
 ```
 
-- [ ] **Step 9: companion — 窗口监听 host 回传的 dismiss**
+- [ ] **Step 10: companion — 扩展现有 w.on("message") 加 dismiss 分支**
 
-在窗口创建循环里（`w.on("error", ...)` 之后）加：
+把窗口循环里**已存在**的：
 
 ```js
   w.on("message", (data) => {
+    // Handle messages from WebView (e.g., collapse button clicks)
+    if (data && data.action === "collapseChanged") {
+      isCollapsed = data.collapsed;
+      log("info", `collapse state changed: ${isCollapsed}`);
+      syncHeight();
+    }
+  });
+```
+
+改为：
+
+```js
+  w.on("message", (data) => {
+    // Handle messages from WebView (collapse button, per-row dismiss)
     if (!data || typeof data !== "object") return;
-    if (data.type === "dismiss" && typeof data.id === "string" && data.id) {
+    if (data.action === "collapseChanged") {
+      isCollapsed = data.collapsed;
+      log("info", `collapse state changed: ${isCollapsed}`);
+      syncHeight();
+    } else if (data.type === "dismiss" && typeof data.id === "string" && data.id) {
       log("info", `dismiss id=${data.id}`);
       removeRowById(data.id);
     }
   });
 ```
 
-- [ ] **Step 10: 语法检查**
+- [ ] **Step 11: 语法检查**
 
 Run: `node --check island/src/companion.mjs && node --check island/src/island.html.mjs`
 Expected: 无输出（两者退出码 0）。
 
-- [ ] **Step 11: [HITL/Windows] 实跑验证回传链路**
+- [ ] **Step 12: [HITL/Windows] 实跑验证（× 删行 + 收起按钮可点）**
 
 在 Windows 上：
 1. `/island reload`（重启 companion，加载新 exe + 新 HTML）。
-2. 造一行测试行（任选其一）：
-   - 在任意 Claude Code pane 里发条消息（出现 thinking 行）；或
-   - 终端跑：`echo {"hook_event_name":"UserPromptSubmit","session_id":"spike1","prompt":"spike","cwd":"C:/tmp"} | node island/src/bridge.mjs hook`
-3. 看到胶囊行右缘有个常显的 ×。把光标移过去、点击它。
-4. `tail` 日志：`Get-Content $HOME\.claude\claude-island.log -Tail 20`
+2. 造一行：`echo {"hook_event_name":"UserPromptSubmit","session_id":"spike1","prompt":"spike","cwd":"C:/tmp"} | node island/src/bridge.mjs hook`（或在某 pane 发条消息）。
+3. 胶囊行右缘有常显 ×，移过去点击它。
+4. 点击底部中央小尖尖（▲）。
+5. 看日志：`Get-Content $HOME\.claude\claude-island.log -Tail 20`。
 
-Expected（四件事全中才算通过）：
-- 鼠标在 × 上是「可点」光标（命中条放行成功）；
-- 点击后该行消失；
-- 日志出现 `dismiss id=spike1`（消息到达 companion）；
-- 多屏时（若 `screen all`）所有屏该行同时消失。
+Expected：
+- × 处是「可点」光标；点击后该行消失；日志 `dismiss id=spike1`；多屏则各屏同消。
+- **收起按钮现在能点了**：点 ▲ 收起（窗口缩到 30px、行折叠）、▼ 展开；日志 `collapse state changed: true/false`。
 
-不通时的判定与回退：
-- 点了没反应、日志无 `dismiss` → 命中区没放行或点击没进 DOM。先确认日志有没有 `update id=spike1`（行确实建出来了）。再考虑回退到 host 侧原生 `WM_LBUTTONDOWN` 按 y 算行（重拾原生点击；尽量不走，先排查 DPI：见下）。
-- × 可见但点击位置偏移（点旁边才触发）→ DPI 缩放问题。临时把 Windows 显示缩放设 100% 复测以确认是 DPI；是则在 `reportHitRects` 上报值或 C# 换算处校正。
+不通时排查：日志有无 `update id=spike1`（行建出来没）；× 点偏 → DPI（临时设 100% 缩放复测，是则在 `reportHitRects` 或 C# 换算处校正）；都不行再考虑 host 侧 `WM_LBUTTONDOWN`（尽量不走）。
 
-- [ ] **Step 12: [HITL/Windows] 重编产物 + 提交**
+- [ ] **Step 13: [Windows] 重编产物 + 提交**
 
-链路通过后提交（含重编的 exe 产物；`.pdb` 与 WebView2 `*.xml` 已被 `.gitignore` 排除）：
+链路通过后提交（含重编 exe 产物；`.pdb`/`*.xml` 已被 `.gitignore` 排除）：
 
 ```bash
 git add island/src/hosts/windows/island-host.cs \
@@ -438,11 +477,12 @@ git add island/src/hosts/windows/island-host.cs \
         island/src/hosts/windows/island-host-win.runtimeconfig.json \
         island/src/island.html.mjs \
         island/src/companion.mjs
-git commit -m "feat: 逐行 × 手动消除（spike：× 常显，打通点击回传链路）
+git commit -m "feat: 逐行 × 手动消除 + 顺带修好收起按钮可点（spike：× 常显）
 
-WM_NCHITTEST 改为只放行 WebView 上报的命中条（胶囊右缘竖带），× 点击经
-window.islandHost.send → host(WebMessageReceived 按 type 分流) → open-fixed
-w.on(message) → companion removeRowById 跨窗广播删行。重编 island-host-win.exe。
+WM_NCHITTEST 改为只放行 WebView 上报的命中矩形（逐行 × 右缘竖带 + 收起按钮），
+× 点击经 window.islandHost.send → host(按 type 分流) → open-fixed w.on(message)
+→ companion removeRowById 跨窗广播删行；扩展现有 message handler 加 dismiss 分支。
+收起按钮因共享同一 hit-test 而首次变得可点。重编 island-host-win.exe。
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ```
@@ -456,7 +496,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 - [ ] **Step 1: × 默认隐藏、hover 淡入**
 
-把 Task 2 加的 `.dismiss` 规则中：
+把 Task 2 加的 `.dismiss` 规则尾部：
 
 ```css
   color: var(--detail-color);
@@ -479,7 +519,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 .row:hover .slot.right { opacity: 0.25; transition: opacity 140ms ease; }
 ```
 
-（`.row:hover` 仅在光标进入右缘命中条时触发——那正是 × 所在处，所以「移到行右缘 → 该行 × 淡入、右侧 Done/耗时让位」。命中条外的行体仍穿透、收不到 hover，符合预期。）
+（`.row:hover` 仅在光标进入右缘命中条时触发——那正是 × 所在处。命中条外的行体仍穿透、收不到 hover，符合预期。）
 
 - [ ] **Step 2: 语法检查**
 
@@ -488,13 +528,12 @@ Expected: 无输出（退出码 0）。
 
 - [ ] **Step 3: [HITL/Windows] 验证 hover 交互**
 
-`/island reload` 后（无需重编 exe，HTML 在 companion 启动时重新生成）：
-- 光标不在行上时：看不到 ×；
-- 光标移到某行右缘：该行 × 淡入、右侧 Done/耗时变淡；移开恢复；
-- 点击淡入的 × → 该行消失、日志 `dismiss id=...`。
+`/island reload` 后（无需重编 exe）：
+- 光标不在行右缘时看不到 ×；移到行右缘 → 该行 × 淡入、右侧 Done/耗时变淡；移开恢复；
+- 点击淡入的 × → 该行消失、日志 `dismiss id=...`；
+- 收起按钮 hover/点击仍正常。
 
-Expected: 上述全部成立。
-不成立（hover 不出 ×）→ mousemove 没送达 WebView：确认 Task 2 的命中条仍在上报（日志/行为正常），必要时把 `stripW` 调宽（如 `40 * curScaleFactor`）增大命中目标后复测。
+Expected: 全部成立。不出 × → 命中条没上报或 mousemove 没送达，必要时把 `stripW` 调宽（`40 * curScaleFactor`）复测。
 
 - [ ] **Step 4: Commit**
 
@@ -516,55 +555,52 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 - [ ] **Step 1: README 行为节**
 
-在 `README.md` 中，定位以 `- **状态保留**:` 开头的那条，在其**后面**插入一行：
+在 `README.md` 中，定位以 `- **状态保留**:` 开头的那条，在其**后面**插入一行（注意它下面已有「收起/展开」一条，插在「状态保留」与「收起/展开」之间）：
 
 ```markdown
 - **逐行消除**: 光标移到某行右缘会浮现 × 按钮，点击即从所有屏幕移除该会话行；行只被「下一个事件覆盖」或「× 手动消除」移除，无定时自动消失
 ```
 
-`README.md` 中以 `- **永久常驻**:` 开头的那条无需改文字（删 idle-exit 后它已属实）。
-
 - [ ] **Step 2: SKILL 行为节**
 
-在 `island/SKILL.md` 中，定位以 `- **状态保留**` 开头的那条（commit 0c91215 加入），在其后插入同样一行：
+在 `island/SKILL.md` 中，定位以 `- **状态保留**` 开头的那条，在其后插入：
 
 ```markdown
 - **逐行消除**: 光标移到某行右缘会浮现 × 按钮，点击即从所有屏幕移除该会话行；行只被「下一个事件覆盖」或「× 手动消除」移除，无定时自动消失。整窗关闭仍用 `/island kill`。
 ```
-
-若 `island/SKILL.md` 行为/常驻描述中提到「60 秒后自动退出 / idle 退出」之类，改为「永久常驻，需 `/island kill` 关闭」。（若无此类描述则跳过。）
 
 - [ ] **Step 3: CHANGELOG**
 
 在 `CHANGELOG.md` 的 `## [Unreleased]` 下，`### Added` 末尾加：
 
 ```markdown
-- **逐行 × 手动消除**: 灵动岛每行新增一个 hover 才显的 × 按钮，点击只移除该会话行（跨所有屏幕同步移除）。× 点击经 `window.islandHost.send({type:"dismiss",id})` → C# host(`WebMessageReceived` 按 `type` 分流) → `open-fixed` 的 `w.on("message")` → companion `removeRowById` 广播 `removeRow`。为让穿透窗上的 × 可点，`WM_NCHITTEST` 改为只放行 WebView 上报的命中条（胶囊右缘竖带，`hitrects` 消息由 host 本地消费、按 `devicePixelRatio` 换算到客户区），其余仍整窗穿透。重编并提交 `island-host-win.exe`。
+- **逐行 × 手动消除**: 灵动岛每行新增一个 hover 才显的 × 按钮，点击只移除该会话行（跨所有屏幕同步移除）。链路：`window.islandHost.send({type:"dismiss",id})` → C# host(`WebMessageReceived` 按 `type` 分流，`hitrects` 本地消费、其余转发) → `open-fixed` 的 `w.on("message")` → companion 扩展现有 handler 调 `removeRowById` 广播 `removeRow`。为让穿透窗上的 × 可点，`island-host.cs` 的 `WM_NCHITTEST` 改为只放行 WebView 上报的命中矩形（逐行 × 右缘竖带 + 收起按钮，按 `devicePixelRatio` 换算到客户区），其余仍整窗穿透。**顺带修好了收起按钮**：它此前因无 hit-test 而点不动，现共享同一命中机制后首次可点。重编并提交 `island-host-win.exe`。
 ```
 
-在 `### Changed` 末尾加：
+在 `## [Unreleased]` 下新增（或追加到已有的）`### Fixed` 小节：
 
 ```markdown
-- **删除 60s idle-exit**: `companion.mjs` 不再在所有 socket 客户端断开满 60 秒后自杀。此前每个 hook 由 bridge 连接/断开一次，「全部 pane 静默 60s」会触发整窗退出，与 README/SKILL/companion 顶部注释一直声称的「永久常驻」矛盾；现删除该计时器，窗口真正永久常驻，整窗关闭只由 `/island kill` 负责。配合新增的逐行 × 手动消除，灵动岛成为一块「只由人手动清理」的持续看板（无任何定时自动消失：done-retract / ROW_TTL 早已删除，idle-exit 此次删除）。
+### Fixed
+- **companion 因 idle-exit 残留调用点崩溃**: 「收起/展开」改动删除了 `idleTimer` 声明与 `scheduleIdleExit()` 函数，却漏删 `companion.mjs` 中两个调用点（连接处理器、`sock.close`），引用已不存在的符号 → `ReferenceError` → companion 在第一个客户端连接时即崩溃退出（`node --check` 查不出此类运行时错误）。删除残留两行，完成 idle-exit 移除：窗口真正永久常驻，整窗关闭只由 `/island kill` 负责（无任何定时自动消失：done-retract / ROW_TTL / idle-exit 均已清除）。
 ```
 
 - [ ] **Step 4: Commit**
 
 ```bash
 git add README.md island/SKILL.md CHANGELOG.md
-git commit -m "docs: 同步逐行 × 手动消除与 idle-exit 删除
+git commit -m "docs: 同步逐行 × 手动消除、收起按钮修复与 idle-exit 残留修复
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ```
 
 ---
 
-## Task 5: 收尾验证（verification-before-completion）
+## Task 5: 收尾验证 + 推送（verification-before-completion）
 
 - [ ] **Step 1: 语法 + 回归**
 
 Run: `node --check island/src/companion.mjs && node --check island/src/island.html.mjs && node --check island/src/bridge.mjs && node island/src/island-test.mjs`
-Expected: `--check` 全无输出；island-test 结尾 13 passed / 0 failed（退出码 0）。
+Expected: `--check` 全无输出；island-test 结尾 13 passed / 0 failed。
 
 - [ ] **Step 2: 确认重编产物已入库**
 
@@ -578,24 +614,32 @@ Expected: 无输出。
 
 - [ ] **Step 4: [HITL/Windows] 端到端最终确认**
 
-多 pane 下：一个 pane 跑到 done、一个停在等待确认；hover 各自右缘点 × 分别消掉；确认窗口不再 60s 自动消失（静默 >60s 仍在）；`/island kill` 能整窗关闭。
+多 pane 下：一个 pane 跑到 done、一个停在等待确认；hover 各自右缘点 × 分别消掉；收起按钮 ▲/▼ 正常；确认窗口不再自动消失（静默 >60s 仍在、且不再崩）；`/island kill` 能整窗关闭。
 
 Expected: 全部符合。
+
+- [ ] **Step 5: 推送到远端 *-dev**
+
+按 CLAUDE.md 新约定，验证完成后推送：
+
+Run: `git push origin 0.0.1-dev`
+Expected: 推送成功。（master 不动，仅用户操作。）
 
 ---
 
 ## Self-Review（计划对照 spec）
 
-- **idle-exit 删除** → Task 1 ✓
-- **逐行 × 回传链路（host 分流 / open-fixed / companion 广播）** → Task 2 ✓
-- **hitrects host 本地消费、dismiss 转发** → Task 2 Step 3-4 ✓
-- **WM_NCHITTEST 命中条 + DPI(dpr 换算)** → Task 2 Step 1-2-4 ✓
+- **修 idle-exit 残留崩溃** → Task 1 ✓
+- **逐行 × 回传链路（host 分流 / open-fixed / companion 扩展 handler）** → Task 2 Step 3/10 ✓
+- **hitrects 含收起按钮 + × 命中条；收起态只报按钮** → Task 2 Step 8（`reportHitRects`）✓
+- **顺带修好收起按钮可点** → Task 2（共享 hit-test）+ Step 12 验证 ✓
+- **WM_NCHITTEST 多矩形 + DPI(dpr)** → Task 2 Step 1/2/4 ✓
 - **hover 才显** → Task 3 ✓
-- **跨窗广播 removeRow** → Task 2 Step 8（`removeRowById` 用 `send()` 广播）✓
-- **重编并提交 exe** → Task 2 Step 5/12 ✓
-- **维持无 TTL** → 不新增任何计时器；Task 5 Step 3 grep 确认 ✓
-- **文档（README/SKILL/CHANGELOG）** → Task 4 ✓
-- **回归 island-test 13/0** → Task 1 Step 6、Task 5 Step 1 ✓
-- **HITL 风险验证（点击进 DOM / hover / DPI）** → Task 2 Step 11、Task 3 Step 3 ✓
+- **跨窗广播 removeRow** → Task 2 Step 9（`removeRowById` 用 `send()`）✓
+- **重编并提交 exe** → Task 2 Step 5/13 ✓
+- **维持无 TTL** → 不新增计时器；Task 5 Step 3 grep ✓
+- **文档（README/SKILL/CHANGELOG Added+Fixed）** → Task 4 ✓
+- **push 到 origin/0.0.1-dev（新 git 约定）** → Task 5 Step 5 ✓
+- **回归 13/0 + HITL 验证** → Task 1 Step 4、Task 5 Step 1、Task 2 Step 12、Task 3 Step 3 ✓
 
-无占位符；类型/命名一致（`removeRowById`、`HitRects`、`UpdateHitRects`、`reportHitRects`/`scheduleReport`/`curScaleFactor` 全程一致）。
+无占位符；命名一致（`removeRowById`、`HitRects`、`UpdateHitRects`、`reportHitRects`/`scheduleReport`/`curScaleFactor`）。所有 old_string 对齐当前真实文件（含收起改动后的 `w.on("message")`、`setCollapsed`、多行 `window.island`）。
