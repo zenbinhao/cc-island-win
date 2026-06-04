@@ -16,6 +16,7 @@
 - `README.md`：补齐与当前实现的差异——新增 `/island theme <dark|pink|auto>` 命令、`screen all` 选项、聚焦跳转说明；架构图 hook 列表补全为 7 个（增加 `StopFailure`、`PermissionRequest`）；新增「更新日志」指向。
 - 初始化 Git 仓库，推送至 `github.com/zenbinhao/cc-island-win`。
 - `island/src/hosts/windows/island-host.csproj`：WebView2 `PackageReference` 由浮动 `1.*` 固定为 `1.0.3912.50`（与仓库已提交的 WebView2 DLL 版本一致）。背景：浮动版本会让重新编译时拉到更新的 WebView2（实测拉到 `1.0.3967.48`），新生成的 `deps.json` 与已提交 DLL 不符，exe 启动即抛 `FileNotFoundException: Microsoft.Web.WebView2.WinForms`；固定版本保证重编确定性、不产生无关的 WebView2 二进制改动。预编译 `island-host-win.exe`/`.dll`/`.deps.json`/`.runtimeconfig.json` 随聚焦功能删除一并重新编译提交。
+- **`bridge.mjs` / `companion.mjs`：状态行改为「保留到下一个事件覆盖」，删除两类定时自动移除。** 此前 `Stop`/`StopFailure` 发完 `done`/`interrupted` 后会再发 `done-retract`，30 秒后移除该行；`companion` 另有 `ROW_TTL_MS=120000` 兜底定时器，行 120 秒无更新即移除。现两者全部删除：done / interrupted / waiting 状态行一律保留到该会话的下一个事件把它覆盖（再次发消息翻回 thinking 等）。整窗清理仍由既有的 60 秒 idle-exit 负责（不在本次改动范围）。连带删除 `companion` 内随之失效的 `done-retract` 协议消息处理、`doneTimers` / `rowLastUpdate` 两张表、`scheduleDoneRetract()` / `clearDoneTimer()` 及 update / remove / cleanup 中的相关调用。背景：维护者常在多 pane 下并行跑 CLI，希望灵动岛作为一块持续看板——已完成的 pane 显示 done、等待授权的 pane 显示 waiting 都应一直可见，而不是各自定时消失；30s/120s 两个定时器恰好打断了这种「看板」语义。`island/SKILL.md` 行为说明同步更新。
 
 ### Removed
 - **聚焦跳转功能（↗ 按钮）整体删除**：移除「鼠标悬停胶囊、每行左侧浮现 ↗ 圆形按钮、点击跳回对应会话终端窗口」的全部能力。涉及四层：

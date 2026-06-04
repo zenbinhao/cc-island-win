@@ -323,7 +323,6 @@ async function handleHook(json) {
         project, status: "done", detail: "",
         prompt: sess.prompt || "", startedAt: sess.startedAt, frozenElapsed: sess.frozenElapsed,
       });
-      await sendToCompanion({ id: sessionId, type: "done-retract", delayMs: 30000 });
       try {
         if (existsSync(STATE_FILE)) {
           const data = JSON.parse(readFileSync(STATE_FILE, "utf8"));
@@ -336,7 +335,7 @@ async function handleHook(json) {
       break;
     }
 
-    // Ctrl+C / abnormal termination — show interrupted briefly then remove
+    // Ctrl+C / abnormal termination — show interrupted until the next event overrides it
     case "StopFailure": {
       sess.inAgent = false;
       if (sess.startedAt != null) sess.frozenElapsed = Date.now() - sess.startedAt;
@@ -346,7 +345,6 @@ async function handleHook(json) {
         project, status: "error", detail: "interrupted",
         prompt: sess.prompt || "", startedAt: sess.startedAt, frozenElapsed: sess.frozenElapsed,
       });
-      await sendToCompanion({ id: sessionId, type: "done-retract", delayMs: 30000 });
       try {
         if (existsSync(STATE_FILE)) {
           const data = JSON.parse(readFileSync(STATE_FILE, "utf8"));

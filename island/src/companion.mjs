@@ -10,7 +10,6 @@
 //   { id, type:"update", project, status, detail, prompt, ctxPct, startedAt, frozenElapsed }
 //   { id, type:"remove" }
 //   { id, type:"scale",   scale:"small"|"medium"|"large"|"xlarge" }
-//   { id, type:"done-retract", delayMs: 5000 }   — auto-remove row after delay
 //   { id, type:"respawn" }
 //
 // Persistent daemon — stays alive until explicitly killed.
@@ -185,24 +184,6 @@ const clients = new Set();
 const socketIds = new WeakMap();
 const activeRowIds = new Set();
 let idleTimer = null;
-const doneTimers = new Map();
-const ROW_TTL_MS = 120000;
-const rowLastUpdate = new Map();
-
-setInterval(() => {
-  const now = Date.now();
-  for (const [id, ts] of rowLastUpdate) {
-    if (now - ts > ROW_TTL_MS) {
-      log("info", `row TTL expired id=${id}`);
-      rowLastUpdate.delete(id);
-      clearDoneTimer(id);
-      activeRowIds.delete(id);
-      currentRows.delete(id);
-      syncHeight();
-      try { send('window.island.removeRow(' + JSON.stringify(id) + ')'); } catch {}
-    }
-  }
-}, 10000);
 
 function syncHeight() {
   const h = Math.max(52, activeRowIds.size * 36 + 8);
@@ -236,8 +217,6 @@ const server = createServer((sock) => {
     if (msg.type === "update") {
       if (!msg.id || !VALID_STATUS.has(msg.status)) return;
       log("info", `update id=${msg.id} status=${msg.status} project=${msg.project||''} prompt="${(msg.prompt||'').substring(0,40)}"`);
-      rowLastUpdate.set(msg.id, Date.now());
-      clearDoneTimer(msg.id);
       activeRowIds.add(msg.id);
       syncHeight();
       const js = 'window.island.upsertRow(' + JSON.stringify(msg.id) + ',' + JSON.stringify(msg) + ')';
@@ -247,19 +226,11 @@ const server = createServer((sock) => {
     }
     if (msg.type === "remove") {
       if (!msg.id) return;
-      clearDoneTimer(msg.id);
       activeRowIds.delete(msg.id);
       currentRows.delete(msg.id);
       syncHeight();
       log("info", `remove id=${msg.id}`);
       send('window.island.removeRow(' + JSON.stringify(msg.id) + ')');
-      return;
-    }
-    if (msg.type === "done-retract") {
-      if (!msg.id) return;
-      const delay = typeof msg.delayMs === "number" ? msg.delayMs : 5000;
-      log("info", `done-retract id=${msg.id} delay=${delay}ms`);
-      scheduleDoneRetract(msg.id, delay);
       return;
     }
     if (msg.type === "scale" && typeof msg.scale === "string") {
@@ -295,24 +266,6 @@ const server = createServer((sock) => {
   });
 });
 
-function clearDoneTimer(id) {
-  const t = doneTimers.get(id);
-  if (t) { clearTimeout(t); doneTimers.delete(id); }
-}
-
-function scheduleDoneRetract(id, delayMs) {
-  clearDoneTimer(id);
-  const t = setTimeout(() => {
-    doneTimers.delete(id);
-    activeRowIds.delete(id);
-    rowLastUpdate.delete(id);
-    currentRows.delete(id);
-    syncHeight();
-    send('window.island.removeRow(' + JSON.stringify(id) + ')');
-  }, delayMs);
-  doneTimers.set(id, t);
-}
-
 server.on("error", (err) => {
   if (err?.code === "EADDRINUSE") {
     log("info", "EADDRINUSE — another companion is already running, exiting");
@@ -334,8 +287,6 @@ function cleanup() {
   if (cleaned) return;
   cleaned = true;
   log("info", "cleanup");
-  for (const t of doneTimers.values()) clearTimeout(t);
-  doneTimers.clear();
   try { server.close(); } catch (e) { log("warn", `server.close failed: ${e.message}`); }
   for (const w of wins) { try { w.close(); } catch (e) { log("warn", `win.close failed: ${e.message}`); } }
 }
