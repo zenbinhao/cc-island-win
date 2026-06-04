@@ -107,6 +107,20 @@ html, body {
 .meta .mono { font-variant-numeric: tabular-nums; }
 .ctx-warn { color: var(--ctx-warn); }
 .ctx-hot  { color: var(--ctx-hot); }
+.dismiss {
+  position: absolute;
+  right: calc(7px * var(--scale));
+  top: 50%;
+  transform: translateY(-50%);
+  width: calc(16px * var(--scale));
+  height: calc(16px * var(--scale));
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 50%;
+  font-size: calc(13px * var(--scale)); line-height: 1;
+  color: var(--detail-color);
+  background: rgba(255,255,255,0.12);
+  cursor: pointer; pointer-events: auto;
+}
 
 /* ── Dark theme animations (default) ─────────────────────────────── */
 @keyframes pulse-waiting {
@@ -341,6 +355,7 @@ body.collapsed #stack {
   var tickerB = null, tickerT = null;
 
   var SCALES = { small: 0.88, medium: 1.0, large: 1.18, xlarge: 1.35 };
+  var curScaleFactor = SCALES.medium;
 
   function esc(s) { return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
@@ -407,7 +422,8 @@ body.collapsed #stack {
     }
     row.el.dataset.spin = s.spin?'true':'false';
     row.el.dataset.status = d.status;
-    row.el.innerHTML = '<div class="slot left">'+left+'</div><div class="slot mid">'+mid+'</div><div class="slot right">'+right+'</div>';
+    var dismiss = '<div class="dismiss" data-id="'+esc(row.id)+'">&times;</div>';
+    row.el.innerHTML = '<div class="slot left">'+left+'</div><div class="slot mid">'+mid+'</div><div class="slot right">'+right+'</div>'+dismiss;
   }
 
   function upsertRow(id, data) {
@@ -424,6 +440,7 @@ body.collapsed #stack {
     rows[id] = row; order.push(id); stack.appendChild(wrap);
     renderRowContent(row);
     requestAnimationFrame(function () { requestAnimationFrame(function () { el.classList.add('visible'); }); });
+    scheduleReport();
     startTickers();
   }
 
@@ -431,9 +448,10 @@ body.collapsed #stack {
     var row = rows[id]; if (!row||row.removing) return;
     row.removing = true; row.el.classList.remove('visible');
     setTimeout(function () { if (row.wrap.parentNode) row.wrap.parentNode.removeChild(row.wrap); delete rows[id]; var i=order.indexOf(id); if(i>=0)order.splice(i,1); }, 340);
+    scheduleReport();
   }
 
-  function setScale(scale) { var factor=SCALES[scale]; if(factor==null)factor=SCALES.medium; document.documentElement.style.setProperty('--scale',String(factor)); }
+  function setScale(scale) { var factor=SCALES[scale]; if(factor==null)factor=SCALES.medium; curScaleFactor=factor; document.documentElement.style.setProperty('--scale',String(factor)); scheduleReport(); }
 
   function setTheme(theme) {
     document.body.classList.remove('theme-dark', 'theme-pink', 'theme-auto');
@@ -465,6 +483,7 @@ body.collapsed #stack {
     } else {
       document.body.classList.remove('collapsed');
     }
+    scheduleReport();
   }
 
   function toggleCollapse() {
@@ -483,6 +502,45 @@ body.collapsed #stack {
       toggleCollapse();
     });
   }
+
+  // ── Hit rects (× strip + collapse button) reported to native host ──────
+  function reportHitRects() {
+    if (!window.islandHost || !window.islandHost.send) return;
+    var dpr = window.devicePixelRatio || 1;
+    var rects = [];
+    var cb = document.getElementById('collapse-btn');
+    if (cb) {
+      var cr = cb.getBoundingClientRect();
+      if (cr.width > 0 && cr.height > 0) rects.push({ x:cr.left, y:cr.top, w:cr.width, h:cr.height });
+    }
+    if (!collapsed) {
+      var wraps = stack.children;
+      if (wraps.length > 0) {
+        var first = wraps[0].getBoundingClientRect();
+        var last  = wraps[wraps.length-1].getBoundingClientRect();
+        var stripW = 34 * curScaleFactor;
+        rects.push({ x: first.right - stripW, y: first.top, w: stripW, h: last.bottom - first.top });
+      }
+    }
+    window.islandHost.send({ type:'hitrects', rects:rects, dpr:dpr });
+  }
+
+  var reportTimer = null;
+  function scheduleReport() {
+    reportHitRects();
+    if (reportTimer) clearTimeout(reportTimer);
+    reportTimer = setTimeout(reportHitRects, 360);
+  }
+
+  // ── Per-row × dismiss (delegated click; only hittable on the right-edge strip) ──
+  stack.addEventListener('click', function (e) {
+    var btn = e.target && e.target.closest ? e.target.closest('.dismiss') : null;
+    if (!btn) return;
+    var id = btn.getAttribute('data-id');
+    if (!id) return;
+    if (window.islandHost && window.islandHost.send) window.islandHost.send({ type:'dismiss', id:id });
+    removeRow(id);
+  });
 
   window.island = {
     upsertRow: upsertRow,

@@ -165,11 +165,15 @@ for (const geo of screenGeos) {
     initWindow(w);
   });
   w.on("message", (data) => {
-    // Handle messages from WebView (e.g., collapse button clicks)
-    if (data && data.action === "collapseChanged") {
+    // Handle messages from WebView (collapse button, per-row dismiss)
+    if (!data || typeof data !== "object") return;
+    if (data.action === "collapseChanged") {
       isCollapsed = data.collapsed;
       log("info", `collapse state changed: ${isCollapsed}`);
       syncHeight();
+    } else if (data.type === "dismiss" && typeof data.id === "string" && data.id) {
+      log("info", `dismiss id=${data.id}`);
+      removeRowById(data.id);
     }
   });
   w.on("closed", () => {
@@ -201,6 +205,13 @@ function syncHeight() {
     const h = Math.max(52, activeRowIds.size * 36 + 8);
     for (const w of wins) { try { w.resize(WIN_W, h); } catch {} }
   }
+}
+
+function removeRowById(id) {
+  activeRowIds.delete(id);
+  currentRows.delete(id);
+  syncHeight();
+  send('window.island.removeRow(' + JSON.stringify(id) + ')');
 }
 
 const server = createServer((sock) => {
@@ -235,11 +246,8 @@ const server = createServer((sock) => {
     }
     if (msg.type === "remove") {
       if (!msg.id) return;
-      activeRowIds.delete(msg.id);
-      currentRows.delete(msg.id);
-      syncHeight();
       log("info", `remove id=${msg.id}`);
-      send('window.island.removeRow(' + JSON.stringify(msg.id) + ')');
+      removeRowById(msg.id);
       return;
     }
     if (msg.type === "scale" && typeof msg.scale === "string") {

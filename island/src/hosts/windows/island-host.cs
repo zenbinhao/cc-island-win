@@ -82,6 +82,11 @@ sealed class IslandForm : Form
 
     const int WM_NCHITTEST  = 0x0084;
     const int HTTRANSPARENT = -1;
+    const int HTCLIENT      = 1;
+
+    // Hittable rectangles in client pixels — set from WebView "hitrects" messages.
+    // Only these regions receive clicks; the rest of the window stays click-through.
+    public Rectangle[] HitRects = Array.Empty<Rectangle>();
 
     [StructLayout(LayoutKind.Sequential)]
     struct WINDOWPOS
@@ -109,7 +114,18 @@ sealed class IslandForm : Form
 
         if (m.Msg == WM_NCHITTEST && HitTestEnabled)
         {
-            // Whole window is click-through: every mouse event passes to windows below.
+            // Click-through everywhere EXCEPT the reported hit rects (× strip + collapse btn).
+            var rects = HitRects;
+            if (rects.Length > 0)
+            {
+                int sx = unchecked((short)(long)m.LParam);
+                int sy = unchecked((short)((long)m.LParam >> 16));
+                var pt = PointToClient(new Point(sx, sy));
+                foreach (var r in rects)
+                {
+                    if (r.Contains(pt)) { m.Result = (IntPtr)HTCLIENT; return; }
+                }
+            }
             m.Result = (IntPtr)HTTRANSPARENT;
             return;
         }
@@ -262,6 +278,11 @@ sealed class IslandHost : IDisposable
                 if (msg?["__islandHost_close"]?.GetValue<bool>() == true)
                 { CloseAndExit(); return; }
 
+                // hit rects are consumed locally (for WM_NCHITTEST), not forwarded.
+                // Everything else (dismiss, collapseChanged) is forwarded to companion.
+                if (msg?["type"]?.GetValue<string>() == "hitrects")
+                { UpdateHitRects(msg!); return; }
+
                 var output = new JsonObject { ["type"] = "message" };
                 output["data"] = JsonNode.Parse(raw);
                 Stdout.Write(output);
@@ -344,6 +365,24 @@ sealed class IslandHost : IDisposable
         }
     }
 
+
+    private void UpdateHitRects(JsonNode msg)
+    {
+        var arr = msg["rects"]?.AsArray();
+        double dpr = msg["dpr"]?.GetValue<double>() ?? 1.0;
+        if (arr == null) { Form.HitRects = Array.Empty<Rectangle>(); return; }
+        var list = new List<Rectangle>(arr.Count);
+        foreach (var r in arr)
+        {
+            if (r == null) continue;
+            int x = (int)Math.Floor((r["x"]?.GetValue<double>() ?? 0) * dpr);
+            int y = (int)Math.Floor((r["y"]?.GetValue<double>() ?? 0) * dpr);
+            int w = (int)Math.Ceiling((r["w"]?.GetValue<double>() ?? 0) * dpr);
+            int h = (int)Math.Ceiling((r["h"]?.GetValue<double>() ?? 0) * dpr);
+            list.Add(new Rectangle(x, y, w, h));
+        }
+        Form.HitRects = list.ToArray();
+    }
 
     private void EmitReady()
     {
