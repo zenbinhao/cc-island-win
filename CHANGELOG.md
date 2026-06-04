@@ -6,6 +6,9 @@
 ## [Unreleased]
 
 ### Added
+- **灵动岛收起/展开交互**：在灵动岛底部中间添加小尖尖按钮（▲/▼），支持手动收起/展开。收起后窗口缩小至 30px 高度，只显示小尖尖按钮；展开时恢复正常高度并显示所有胶囊行。交互逻辑：(1) 点击 ▲ 手动收起，(2) 点击 ▼ 手动展开，(3) 收起状态下有新状态更新时自动展开。状态仅内存态，不持久化。涉及文件：
+  - `island.html.mjs`：新增 `#collapse-btn` 按钮样式与 SVG 图标、`body.collapsed` CSS 折叠动画（300ms cubic-bezier）、前端状态管理（`collapsed` 变量、`setCollapsed()`/`toggleCollapse()` 函数）、通过 `window.islandHost.send()` 向 companion 通知状态变更。
+  - `companion.mjs`：新增 `isCollapsed` 全局变量、`WIN_H_COLLAPSED=30` 常量；监听 WebView `message` 事件处理 `collapseChanged` 动作；`syncHeight()` 根据 collapsed 状态选择窗口高度；`update` 消息到达时若处于收起状态则自动展开（调用 `setCollapsed(false)` 并通知前端）。
 - `CLAUDE.md`：面向 Claude Code 的仓库指引（项目概述、常用命令、跨进程架构、仓库维护约定）。
 - `CHANGELOG.md`：本变更日志，作为版本维护历史的唯一权威记录。
 - `.gitignore`：新增忽略 `*.pdb`（.NET 调试符号）与 `Microsoft.Web.WebView2.*.xml`（WebView2 IntelliSense 文档，约 700KB），二者运行时均不需要。

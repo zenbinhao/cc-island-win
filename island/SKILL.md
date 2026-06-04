@@ -287,6 +287,7 @@ node ~/.claude/skills/island/src/bridge.mjs status
 - **自动启动**: Claude Code 启动时（SessionStart hook），灵动岛自动出现。
 - **自动出现**: 发送消息后，状态行立即显示（UserPromptSubmit hook）。
 - **状态保留**: done（完成）、interrupted（中断）、waiting（等待确认）等状态行不再定时自动移除——会一直保留到该会话的下一个事件把它覆盖（例如完成后再次发消息翻回「思考中」）。多 pane 下灵动岛即一块持续的会话状态看板。
+- **收起/展开**: 点击底部中间的小尖尖按钮（▲ 收起 / ▼ 展开）可手动收起灵动岛。收起后窗口缩小至 30px 高度，仅显示按钮；有新状态更新时自动展开。状态为内存态，不持久化。
 - **多会话**: 每个 Claude Code 实例有独立的 sessionId，灵动岛会堆叠显示各行。
 - **永久常驻**: companion 不会自动退出，灵动岛窗口在屏幕顶部持续显示。关闭需用 `/island kill`。
 - **重启恢复**: 电脑重启后，下次打开 Claude Code 时 SessionStart hook 自动启动灵动岛，无需手动操作。
