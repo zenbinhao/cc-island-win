@@ -120,7 +120,12 @@ html, body {
   color: var(--detail-color);
   background: rgba(255,255,255,0.12);
   cursor: pointer; pointer-events: auto;
+  opacity: 0;
+  transition: opacity 140ms ease, background 140ms ease;
 }
+.row:hover .dismiss { opacity: 0.85; }
+.dismiss:hover { opacity: 1; background: rgba(255,255,255,0.2); }
+.row:hover .slot.right { opacity: 0.25; transition: opacity 140ms ease; }
 
 /* ── Dark theme animations (default) ─────────────────────────────── */
 @keyframes pulse-waiting {
