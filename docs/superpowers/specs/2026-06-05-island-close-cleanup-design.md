@@ -125,7 +125,7 @@ export function deadRowIds(rowPids, isAlive) { ... }
 - **ccPid 缺失/为 0**：探活清扫跳过无 pid 的行（只摘「明确探到已死」的，不摘「不知道」的），避免误删。
 - **EPERM**：视为存活（保守），不摘。
 - **多窗口**：`removeRowById` 经 `send()` 广播 `removeRow` 到所有窗口；隐藏/复现亦对所有 `wins` 生效。
-- **手动 × 与隐藏的交互**：见「待评审决策」。
+- **手动 × 与隐藏的交互**：`dismiss` 走 `removeRowById`，空了同样隐藏（见「已决议」）。
 - **native Windows**：范围外；机制不报错，但行为不保证。
 
 ## 测试与验证
