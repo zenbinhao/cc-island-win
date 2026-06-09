@@ -83,6 +83,7 @@ SessionEnd hook → node(.exe) bridge.mjs hook
 
 - SKILL.md hook 配置新增第 8 个：`"SessionEnd": [{... bridge.mjs hook}]`。
 - 命令同其它 hook 用 `hook` 子命令（非 `on`），WSL 下 `node` 换 `node.exe`。
+- **SessionEnd.reason 语义**：对**所有** reason（prompt_input_exit / clear / resume / logout / other）均执行 remove，因旧 session 语义已结束；新 session 后续由 SessionStart / update 重建行。若实测 `/clear` 产生不可接受闪烁，再单独收窄 reason 白名单。
 
 ### B. 兑底通道 —— 父进程探活
 
@@ -93,7 +94,7 @@ companion setInterval(30_000)：
   → 对 rowPids 每项 process.kill(pid,0)；抛 ESRCH（且非 EPERM）→ removeRowById(id) + rowPids.delete(id)
 ```
 
-- bridge：在 handleHook 顶部取 `const ccPid = process.ppid;`，并入每个 `sendToCompanion({... type:"update" ...})` 的 payload。
+- bridge：在 handleHook 顶部取 `const ccPid = process.ppid;`，并入每个 `sendToCompanion({... type:"update" ...})` 的 payload。**ccPid 是所有 update 的公共字段，实现应避免漏掉某个 update 路径**（UserPromptSubmit / PreToolUse / PostToolUse error分支 / PostToolUse thinking分支 / PermissionRequest / Stop / StopFailure 共7处）。**ccPid 是所有 update 的公共字段，实现应避免漏掉某个 update 路径**（UserPromptSubmit / PreToolUse / PostToolUse×2 / PermissionRequest / Stop / StopFailure 共7处）。
 - companion：
   - 新增 `const rowPids = new Map();`，`update` 分支里 `if (typeof msg.ccPid === "number") rowPids.set(msg.id, msg.ccPid);`。
   - `removeRowById(id)` 内补 `rowPids.delete(id)`。
@@ -101,8 +102,24 @@ companion setInterval(30_000)：
 
 ### C. 整窗隐藏（空了）
 
-`removeRowById` 末尾：若 `activeRowIds.size === 0` → 隐藏所有窗口。
-- **推荐手段（B 方案，不动 C#）**：`for (w of wins) w.resize(WIN_W, 0)`，把窗口压成 0 高。透明背景 + 0 高 ≈ 不可见。
+**实现手段：让 `syncHeight()` 统一处理空态**（推荐，避免多路径不一致）：
+
+```javascript
+function syncHeight() {
+  if (activeRowIds.size === 0) {
+    for (const w of wins) w.resize(WIN_W, 0);  // 空了隐藏
+    return;
+  }
+  if (isCollapsed) {
+    for (const w of wins) w.resize(WIN_W, WIN_H_COLLAPSED);
+  } else {
+    const h = Math.max(52, activeRowIds.size * 36 + 8);
+    for (const w of wins) w.resize(WIN_W, h);
+  }
+}
+```
+
+- **受益路径**：removeRowById（手动 × / SessionEnd / 探活）、initWindow（companion 初始空态）、update 分支（复现）—— 全部统一走同一规则，避免漏某个摘行路径或启动时闪 52px 空壳。
 - **复现**：`update` 分支已有「activeRowIds.add + syncHeight」，syncHeight 会按行数 resize 回正常高度，自然复现。
 - 备选手段（A 方案，若 0 高仍可见）：给 host 加 `hide/show` stdin 命令（动 `island-host.cs` 的 `Form.Hide()`/`ShowPassive()` + 重编 exe + 提交二进制）。
 
@@ -126,13 +143,14 @@ export function deadRowIds(rowPids, isAlive) { ... }
 - **EPERM**：视为存活（保守），不摘。
 - **多窗口**：`removeRowById` 经 `send()` 广播 `removeRow` 到所有窗口；隐藏/复现亦对所有 `wins` 生效。
 - **手动 × 与隐藏的交互**：`dismiss` 走 `removeRowById`，空了同样隐藏（见「已决议」）。
+- **Stop 仍只冻结不摘行**：Stop 表示一次 assistant turn 结束，不是 Claude Code 进程退出，仍发 `type:"update"` 冻成 `done` 保留行；真正会话结束只由 SessionEnd 或探活摘行。
 - **native Windows**：范围外；机制不报错，但行为不保证。
 
 ## 测试与验证
 
 - **自动化护栏**：
   - `node --check`（语法）。
-  - `node island/src/island-test.mjs`：新增「`SessionEnd` 事件 → bridge 发出 `type:"remove"` + 删 `_sessionData[sessionId]`」的回归（向 bridge 灌 SessionEnd stdin JSON，断言行为）。现有用例应保持通过。
+  - `node island/src/island-test.mjs`：新增「`SessionEnd` 事件 → bridge 发出 `type:"remove"` + 删 `_sessionData[sessionId]`」的回归。**测试手段**：起临时 fake socket server 捕获 bridge 发出的 JSON line，断言 `{ id, type:"remove" }`；状态文件断言 `_sessionData[sessionId]` 已删除。避免只测状态文件、漏掉真正的 UI remove 消息。现有用例应保持通过。
   - `deadRowIds` 纯函数单测（假 isAlive）。
 - **HITL（GUI/真实进程，必需）**：
   1. WSL pane 跑 CC，Ctrl+C/Ctrl+D/exit → 对应行**秒级消失**（SessionEnd）。
