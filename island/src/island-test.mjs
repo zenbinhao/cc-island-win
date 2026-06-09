@@ -8,7 +8,8 @@ import { existsSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { connect } from "node:net";
+import { connect, createServer } from "node:net";
+import { createInterface } from "node:readline";
 import { SOCK } from "./socket-path.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -156,6 +157,25 @@ async function main() {
   // 边界: 全活
   const allAlive = new Map([["x", 1], ["y", 2]]);
   assert(deadRowIds(allAlive, () => true).length === 0, "全活返回空数组");
+
+  // ── Test 10: SessionEnd 即时摘行 ───────────────────────────────────
+  console.log("\n10. SessionEnd hook 处理");
+
+  await runBridge(JSON.stringify({
+    session_id: "sess-end", cwd: "/home/end",
+    hook_event_name: "UserPromptSubmit", prompt: "will end",
+  }));
+  const stateBefore = readState();
+  assert(stateBefore._sessionData["sess-end"], "sess-end 会话已创建");
+
+  // 触发 SessionEnd
+  await runBridge(JSON.stringify({
+    session_id: "sess-end", cwd: "/home/end",
+    hook_event_name: "SessionEnd", reason: "prompt_input_exit",
+  }));
+
+  const stateAfter = readState();
+  assert(!stateAfter._sessionData?.["sess-end"], "SessionEnd 后 session 数据已删除");
 
   // ── Results ───────────────────────────────────────────────────────────
   console.log(`\n=== 结果: ${passed} 通过, ${failed} 失败 ===`);

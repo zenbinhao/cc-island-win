@@ -357,6 +357,26 @@ async function handleHook(json) {
       break;
     }
 
+    case "SessionEnd": {
+      const reason = json.reason || "(none)";
+      log(`SessionEnd reason=${reason} session=${sessionId}`);
+      // 对所有 reason 执行 remove(clear/resume/logout/prompt_input_exit/other)
+      await sendToCompanion({
+        id: sessionId, type: "remove",
+      });
+      // 删除 session 数据(复用 Stop 逻辑)
+      try {
+        if (existsSync(STATE_FILE)) {
+          const data = JSON.parse(readFileSync(STATE_FILE, "utf8"));
+          if (data && data._sessionData && data._sessionData[sessionId]) {
+            delete data._sessionData[sessionId];
+            writeFileSync(STATE_FILE, JSON.stringify(data, null, 2));
+          }
+        }
+      } catch {}
+      break;
+    }
+
     default: {
       log(`unhandled hook event: ${event}`);
     }
