@@ -21,7 +21,7 @@ description: >
 
 ```
 Claude Code hooks (settings.json)
-  ↓ SessionStart / UserPromptSubmit / PreToolUse / PostToolUse / Stop / StopFailure / PermissionRequest
+  ↓ SessionStart / UserPromptSubmit / PreToolUse / PostToolUse / Stop / StopFailure / PermissionRequest / SessionEnd
 bridge.mjs  (一次性进程，每次 hook 调用，数据来自 stdin JSON)
   ↓ Named pipe
 companion.mjs  (常驻守护进程，永不自动退出)
@@ -68,7 +68,8 @@ companion.mjs  (常驻守护进程，永不自动退出)
 配置 hooks 时（WSL 的 `~/.claude/settings.json`，如 `/root/.claude/settings.json`），把命令里的 `node` 换成 `node.exe`，bridge 路径用 Windows 形式 `C:/…`：
 
 ```json
-"SessionStart": [{"matcher":"","hooks":[{"type":"command","command":"node.exe C:/Users/<你>/.../island/src/bridge.mjs on"}]}]
+"SessionStart": [{"matcher":"","hooks":[{"type":"command","command":"node.exe C:/Users/<你>/.../island/src/bridge.mjs on"}]}],
+"SessionEnd": [{"matcher":"","hooks":[{"type":"command","command":"node.exe C:/Users/<你>/.../island/src/bridge.mjs hook"}]}]
 ```
 
 其余 6 个 hook 同理改用 `node.exe ... bridge.mjs hook`。`node.exe` 在 WSL 默认 PATH 内可直接调用，interop 会把 hook 的 stdin JSON 原样透传到 Windows node（含中文 / emoji，已实测无损；终端经 `WT_SESSION` 仍识别为 `windows-terminal`）。代价：每个 hook 多一次 interop 冷启动（约 1~2 秒）。状态文件统一落在 Windows 侧 `C:\Users\<你>\.claude`，与 Windows 原生会话共享、按 session 堆叠不串。
@@ -145,7 +146,8 @@ node ~/.claude/skills/island/src/bridge.mjs init
     "PostToolUse": [{"matcher":"","hooks":[{"type":"command","command":"node <HOME>/.claude/skills/island/src/bridge.mjs hook"}]}],
     "Stop": [{"matcher":"","hooks":[{"type":"command","command":"node <HOME>/.claude/skills/island/src/bridge.mjs hook"}]}],
     "StopFailure": [{"matcher":"","hooks":[{"type":"command","command":"node <HOME>/.claude/skills/island/src/bridge.mjs hook"}]}],
-    "PermissionRequest": [{"matcher":"","hooks":[{"type":"command","command":"node <HOME>/.claude/skills/island/src/bridge.mjs hook"}]}]
+    "PermissionRequest": [{"matcher":"","hooks":[{"type":"command","command":"node <HOME>/.claude/skills/island/src/bridge.mjs hook"}]}],
+    "SessionEnd": [{"matcher":"","hooks":[{"type":"command","command":"node <HOME>/.claude/skills/island/src/bridge.mjs hook"}]}]
   }
 }
 ```
@@ -167,7 +169,7 @@ node -e "const s=require(process.env.HOME+'/.claude/settings.json'); for(const [
 
 > ✅ 灵动岛配置完成！
 > - 状态：运行中
-> - 已配置 7 个 hook：SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, Stop, StopFailure, PermissionRequest
+> - 已配置 8 个 hook：SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, Stop, StopFailure, PermissionRequest, SessionEnd
 > -  支持开机自启
 >
 > 常用命令：
@@ -285,6 +287,8 @@ node ~/.claude/skills/island/src/bridge.mjs status
 ## 行为说明
 
 - **自动启动**: Claude Code 启动时（SessionStart hook），灵动岛自动出现。
+- **关闭 CC 自动摘行**: Ctrl+C/Ctrl+D/exit → SessionEnd hook 秒级摘行；直接叉掉终端窗口 → 父进程探活（30s 轮询，process.kill 判活）兜底。**仅 WSL2 验证**，native Windows 未测试。
+- **空了整窗隐藏**: 最后一行移除后窗口隐藏（resize 0 高），companion 守护进程继续存活；下次任意 update 自动复现。
 - **自动出现**: 发送消息后，状态行立即显示（UserPromptSubmit hook）。
 - **状态保留**: done（完成）、interrupted（中断）、waiting（等待确认）等状态行不再定时自动移除——会一直保留到该会话的下一个事件把它覆盖（例如完成后再次发消息翻回「思考中」）。多 pane 下灵动岛即一块持续的会话状态看板。
 - **逐行消除**: 光标移到某行右缘会浮现 × 按钮，点击即从所有屏幕移除该会话行；行只被「下一个事件覆盖」或「× 手动消除」移除，无定时自动消失。整窗关闭仍用 `/island kill`。
