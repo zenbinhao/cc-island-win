@@ -18,6 +18,7 @@
 import { createServer } from "node:net";
 import { createInterface } from "node:readline";
 import { existsSync, readFileSync, unlinkSync, mkdirSync, appendFileSync, statSync, writeFileSync } from "node:fs";
+import { deadRowIds, processIsAlive } from "./liveness.mjs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -197,8 +198,13 @@ try { mkdirSync(PREF_DIR, { recursive: true }); } catch (e) { log("warn", `mkdir
 const clients = new Set();
 const socketIds = new WeakMap();
 const activeRowIds = new Set();
+const rowPids = new Map();  // id → ccPid, 用于探活
 
 function syncHeight() {
+  if (activeRowIds.size === 0) {
+    for (const w of wins) { try { w.resize(WIN_W, 0); } catch {} }
+    return;
+  }
   if (isCollapsed) {
     for (const w of wins) { try { w.resize(WIN_W, WIN_H_COLLAPSED); } catch {} }
   } else {
@@ -209,8 +215,11 @@ function syncHeight() {
 
 function removeRowById(id) {
   activeRowIds.delete(id);
+  rowPids.delete(id);
   currentRows.delete(id);
-  syncHeight();
+  syncHeight();  // 空了会自动隐藏(在 syncHeight 里统一处理)
+  send('window.island.removeRow(' + JSON.stringify(id) + ')');
+}
   send('window.island.removeRow(' + JSON.stringify(id) + ')');
 }
 
@@ -232,6 +241,9 @@ const server = createServer((sock) => {
       if (!msg.id || !VALID_STATUS.has(msg.status)) return;
       log("info", `update id=${msg.id} status=${msg.status} project=${msg.project||''} prompt="${(msg.prompt||'').substring(0,40)}"`);
       activeRowIds.add(msg.id);
+      if (typeof msg.ccPid === "number" && msg.ccPid > 0) {
+        rowPids.set(msg.id, msg.ccPid);
+      }
       // Auto-expand when new update arrives
       if (isCollapsed) {
         isCollapsed = false;
@@ -296,6 +308,15 @@ server.on("error", (err) => {
 server.listen(SOCK, () => {
   log("info", `listening on ${SOCK}`);
 });
+
+// ── Liveness checker (30s) ─────────────────────────────────────────────
+setInterval(() => {
+  const dead = deadRowIds(rowPids, processIsAlive);
+  for (const id of dead) {
+    log("info", `liveness check: row ${id} pid=${rowPids.get(id)} is dead, removing`);
+    removeRowById(id);
+  }
+}, 30_000);
 
 // ── Cleanup ────────────────────────────────────────────────────────────
 let cleaned = false;
