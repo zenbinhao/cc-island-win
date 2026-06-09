@@ -114,15 +114,32 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 **Files:**
 - Modify: `island/src/bridge.mjs:358` (在 StopFailure 后、default 前插入 SessionEnd case)
-- Test: `island/src/island-test.mjs:147+` (追加 SessionEnd 测试)
+- Test: `island/src/island-test.mjs:147+` (追加 SessionEnd 测试,用 fake socket 捕获 remove)
 
-- [ ] **Step 1: 写 SessionEnd 的失败测试**
+- [ ] **Step 1: 写 SessionEnd 的失败测试(带 fake socket server)**
 
 在 `island/src/island-test.mjs` 测试9后追加:
 
 ```javascript
-  // ── Test 10: SessionEnd 即时摘行 ───────────────────────────────────
+  // ── Test 10: SessionEnd 即时摘行(fake socket 捕获 remove) ──────────
   console.log("\n10. SessionEnd hook 处理");
+  
+  // 起临时 fake companion socket
+  const fakeServer = createServer((sock) => {
+    const rl = createInterface({ input: sock, crlfDelay: Infinity });
+    rl.on("line", (line) => {
+      try {
+        const msg = JSON.parse(line);
+        if (msg.type === "remove" && msg.id === "sess-end") {
+          assert(true, "SessionEnd 发出 type:remove 消息");
+          sock.end();
+          fakeServer.close();
+        }
+      } catch {}
+    });
+  });
+  await new Promise((r) => { fakeServer.listen(SOCK, r); });
+  
   await runBridge(JSON.stringify({
     session_id: "sess-end", cwd: "/home/end",
     hook_event_name: "UserPromptSubmit", prompt: "will end",
@@ -131,20 +148,21 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
   assert(stateBefore._sessionData["sess-end"], "sess-end 会话已创建");
   
   // 触发 SessionEnd
-  const rEnd = await runBridge(JSON.stringify({
+  await runBridge(JSON.stringify({
     session_id: "sess-end", cwd: "/home/end",
     hook_event_name: "SessionEnd", reason: "prompt_input_exit",
   }));
   
+  await sleep(500);  // 等 socket 消息
   const stateAfter = readState();
   assert(!stateAfter._sessionData?.["sess-end"], "SessionEnd 后 session 数据已删除");
-  assert(rEnd.stderr.includes("session=sess-end"), "SessionEnd 被处理");
+```
 ```
 
 - [ ] **Step 2: 运行测试验证失败**
 
 Run: `node island/src/island-test.mjs`
-Expected: 测试10失败,session 数据未删除(因 bridge 还没 SessionEnd case)
+Expected: 测试10失败,fake socket 未收到 remove 消息(因 bridge 还没 SessionEnd case)
 
 - [ ] **Step 3: 在 bridge.mjs 实现 SessionEnd case**
 
@@ -152,7 +170,9 @@ Expected: 测试10失败,session 数据未删除(因 bridge 还没 SessionEnd ca
 
 ```javascript
     case "SessionEnd": {
-      log(`SessionEnd reason=${json.reason || "(none)"}`);
+      const reason = json.reason || "(none)";
+      log(`SessionEnd reason=${reason}`);
+      // 对所有 reason 执行 remove(clear/resume/logout/prompt_input_exit/other)
       await sendToCompanion({
         id: sessionId, type: "remove",
       });
@@ -173,7 +193,7 @@ Expected: 测试10失败,session 数据未删除(因 bridge 还没 SessionEnd ca
 - [ ] **Step 4: 运行测试验证通过**
 
 Run: `node island/src/island-test.mjs`
-Expected: 测试10通过,总计 "15 通过, 0 失败"
+Expected: 测试10通过,总计 "16 通过, 0 失败"
 
 - [ ] **Step 5: Commit**
 
@@ -306,10 +326,10 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 ---
 
-### Task 4: companion 记录 ccPid + 探活清扫
+### Task 4: companion 记录 ccPid + 探活清扫 + syncHeight 空态隐藏
 
 **Files:**
-- Modify: `island/src/companion.mjs:199+` (新增 rowPids Map, update 分支记 pid, removeRowById 删 pid, 30s 探活定时器)
+- Modify: `island/src/companion.mjs:199+` (新增 rowPids Map, update 分支记 pid, syncHeight 空态隐藏, removeRowById 删 pid, 30s 探活定时器)
 
 - [ ] **Step 1: 在 companion 顶部导入 liveness**
 
@@ -327,7 +347,40 @@ import { deadRowIds, processIsAlive } from "./liveness.mjs";
 const rowPids = new Map();  // id → ccPid, 用于探活
 ```
 
-- [ ] **Step 3: update 分支记录 ccPid**
+- [ ] **Step 3: syncHeight 统一处理空态隐藏**
+
+修改 `companion.mjs:201-208` 的 `syncHeight`:
+
+```javascript
+function syncHeight() {
+  if (activeRowIds.size === 0) {
+    for (const w of wins) { try { w.resize(WIN_W, 0); } catch {} }
+    return;
+  }
+  if (isCollapsed) {
+    for (const w of wins) { try { w.resize(WIN_W, WIN_H_COLLAPSED); } catch {} }
+  } else {
+    const h = Math.max(52, activeRowIds.size * 36 + 8);
+    for (const w of wins) { try { w.resize(WIN_W, h); } catch {} }
+  }
+}
+```
+
+- [ ] **Step 4: removeRowById 删除 ccPid**
+
+修改 `companion.mjs:210-215` 的 `removeRowById`:
+
+```javascript
+function removeRowById(id) {
+  activeRowIds.delete(id);
+  rowPids.delete(id);
+  currentRows.delete(id);
+  syncHeight();  // 空了会自动隐藏(在 syncHeight 里统一处理)
+  send('window.island.removeRow(' + JSON.stringify(id) + ')');
+}
+```
+
+- [ ] **Step 5: update 分支记录 ccPid**
 
 在 `companion.mjs:234` (activeRowIds.add 行后)插入:
 
@@ -337,15 +390,7 @@ const rowPids = new Map();  // id → ccPid, 用于探活
       }
 ```
 
-- [ ] **Step 4: removeRowById 删除 ccPid**
-
-在 `companion.mjs:211` (activeRowIds.delete 行后)插入:
-
-```javascript
-  rowPids.delete(id);
-```
-
-- [ ] **Step 5: 新增 30s 探活定时器**
+- [ ] **Step 6: 新增 30s 探活定时器**
 
 在 `companion.mjs:295` (server.listen 后,文件末尾前)插入:
 
@@ -361,68 +406,27 @@ setInterval(() => {
 }, 30_000);
 ```
 
-- [ ] **Step 6: 运行测试验证不破坏现有功能**
+- [ ] **Step 7: 运行测试验证不破坏现有功能**
 
 Run: `node island/src/island-test.mjs`
-Expected: 所有测试仍通过 "15 通过, 0 失败"
+Expected: 所有测试仍通过 "16 通过, 0 失败"
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add island/src/companion.mjs
-git commit -m "feat: companion 30s 探活清扫(process.kill 判活,零 PowerShell)
+git commit -m "feat: companion 探活清扫 + syncHeight 空态隐藏(统一所有路径)
+
+- 30s 探活定时器(process.kill 判活,零 PowerShell)
+- syncHeight 统一处理空态(removeRowById/initWindow/update 全走同一规则)
+- 避免初始空壳和多路径不一致
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ```
 
 ---
 
-### Task 5: removeRowById 空了隐藏窗口
-
-**Files:**
-- Modify: `island/src/companion.mjs:210-215` (removeRowById 末尾加空判隐藏)
-
-- [ ] **Step 1: 在 removeRowById 末尾加窗口隐藏逻辑**
-
-修改 `companion.mjs:210-215` 的 `removeRowById`:
-
-```javascript
-function removeRowById(id) {
-  activeRowIds.delete(id);
-  rowPids.delete(id);
-  currentRows.delete(id);
-  syncHeight();
-  send('window.island.removeRow(' + JSON.stringify(id) + ')');
-  
-  // 空了隐藏窗口(resize 0 高,不动 C#)
-  if (activeRowIds.size === 0) {
-    log("info", "last row removed, hiding window (resize to 0)");
-    for (const w of wins) {
-      try { w.resize(WIN_W, 0); } catch (e) {
-        log("warn", `resize(0) failed: ${e.message}`);
-      }
-    }
-  }
-}
-```
-
-- [ ] **Step 2: 运行测试验证不破坏现有功能**
-
-Run: `node island/src/island-test.mjs`
-Expected: 所有测试仍通过 "15 通过, 0 失败"
-
-- [ ] **Step 3: Commit**
-
-```bash
-git add island/src/companion.mjs
-git commit -m "feat: 空了隐藏窗口(resize 0 高),下次 update 自动复现
-
-Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
-```
-
----
-
-### Task 6: SKILL.md 新增 SessionEnd hook 配置
+### Task 5: SKILL.md 新增 SessionEnd hook 配置
 
 **Files:**
 - Modify: `island/SKILL.md:24,71,137-148,170,287` (架构/hook 配置/计数)
@@ -477,7 +481,7 @@ git commit -m "docs: SKILL.md 新增 SessionEnd hook(第8个) + 关闭摘行/空
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ```
 
-### Task 7: README.md 同步行为描述
+### Task 6: README.md 同步行为描述
 
 **Files:**
 - Modify: `README.md` (行为节同步 SessionEnd / 关闭摘行 / 空了隐藏)
@@ -500,7 +504,7 @@ git commit -m "docs: README 同步关闭摘行/空了隐藏行为
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ```
 
-### Task 8: CHANGELOG.md 记录变更
+### Task 7: CHANGELOG.md 记录变更
 
 **Files:**
 - Modify: `CHANGELOG.md` (顶部追加 Added 条目)
@@ -525,7 +529,7 @@ git commit -m "docs: CHANGELOG 记录 SessionEnd 摘行 + 探活兜底 + 空了�
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ```
 
-### Task 9: HITL 验证(必需,GUI/真实进程)
+### Task 8: HITL 验证(必需,GUI/真实进程)
 
 **Files:**
 - 无代码改动,纯人工验证
@@ -587,7 +591,7 @@ Expected: 灵动岛窗口自动复现,显示新会话行。
 
 ---
 
-### Task 10: Push 到远端 0.0.1-dev
+### Task 9: Push 到远端 0.0.1-dev
 
 **Files:**
 - 无
@@ -617,12 +621,12 @@ Expected: 推送成功,所有 commits 上传到远端 0.0.1-dev 分支。
 
 - [x] SessionEnd 即时摘行 → Task 2
 - [x] 父进程探活兜底 → Task 1(纯函数) + Task 3(ccPid) + Task 4(定时器)
-- [x] 空了隐藏窗口 → Task 5
-- [x] SKILL.md hook 配置 SessionEnd → Task 6
-- [x] README/CHANGELOG 同步 → Task 7,8
-- [x] 测试(SessionEnd 回归 + deadRowIds 单测) → Task 1,2
-- [x] HITL 验证 → Task 9
-- [x] Push 远端 → Task 10
+- [x] 空了隐藏窗口(syncHeight统一) → Task 4
+- [x] SKILL.md hook 配置 SessionEnd → Task 5
+- [x] README/CHANGELOG 同步 → Task 6,7
+- [x] 测试(SessionEnd 回归+fake socket + deadRowIds 单测) → Task 1,2
+- [x] HITL 验证 → Task 8
+- [x] Push 远端 → Task 9
 
 ### 2. Placeholder 扫描
 
@@ -633,4 +637,5 @@ Expected: 推送成功,所有 commits 上传到远端 0.0.1-dev 分支。
 - `deadRowIds(rowPids, isAlive)` → 各任务统一
 - `ccPid` / `rowPids` / `processIsAlive` → 统一
 - `removeRowById(id)` → 统一调用点
+- `syncHeight()` 空态处理 → Task 4 统一实现
 
