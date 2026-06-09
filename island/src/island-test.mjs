@@ -138,6 +138,25 @@ async function main() {
   const state8 = readState();
   assert(!state8._sessionData?.["old-sess"], "过期 session (10min+) 被清理");
 
+  // ── Test 9: deadRowIds 纯函数 ────────────────────────────────────────
+  console.log("\n9. deadRowIds 纯函数(探活逻辑)");
+  // 动态导入 liveness.mjs(还不存在)
+  const { deadRowIds } = await import("./liveness.mjs");
+
+  const pids = new Map([["a", 100], ["b", 200], ["c", 300]]);
+  const fakeIsAlive = (pid) => pid !== 200;  // 200 已死
+  const dead = deadRowIds(pids, fakeIsAlive);
+
+  assert(dead.length === 1, "deadRowIds 返回1个死 id");
+  assert(dead[0] === "b", "deadRowIds 正确识别 pid=200 对应 id=b");
+
+  // 边界: 空 Map
+  assert(deadRowIds(new Map(), fakeIsAlive).length === 0, "空 Map 返回空数组");
+
+  // 边界: 全活
+  const allAlive = new Map([["x", 1], ["y", 2]]);
+  assert(deadRowIds(allAlive, () => true).length === 0, "全活返回空数组");
+
   // ── Results ───────────────────────────────────────────────────────────
   console.log(`\n=== 结果: ${passed} 通过, ${failed} 失败 ===`);
   process.exit(failed > 0 ? 1 : 0);
