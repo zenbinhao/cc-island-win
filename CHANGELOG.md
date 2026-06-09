@@ -6,6 +6,13 @@
 ## [Unreleased]
 
 ### Added
+- **关闭 CC 自动摘行**：Ctrl+C / Ctrl+D / exit → SessionEnd hook 秒级摘行；直接叉掉终端窗口 → 父进程探活（30s 轮询，process.kill 判活）兜底。细节：
+  - `liveness.mjs`：纯函数 `deadRowIds(rowPids, isAlive)` 返回已死进程的 id 列表，`processIsAlive(pid)` 基于 `process.kill(pid,0)` 判活（ESRCH → 死，EPERM/其它 → 保守判活）。配套测试（island-test.mjs 测试 9）。
+  - `bridge.mjs`：SessionEnd case 发 `type:remove` 到 companion 并删除 `_sessionData[sessionId]`（复用 Stop 清理逻辑）；handleHook 顶部取 `ccPid = process.ppid`，7 处 update payload 全部加上 ccPid 字段。
+  - `companion.mjs`：新增 `rowPids` Map (id → ccPid)；update 分支记录 ccPid；30s 定时器调用 `deadRowIds(rowPids, processIsAlive)` 清扫已死进程（零 PowerShell）。
+  - `syncHeight()` 统一处理空态隐藏：`activeRowIds.size === 0` 时 resize 0 高，避免初始空壳和多路径不一致（removeRowById/initWindow/update 全走同一规则）。
+  - `island/SKILL.md`：架构事件列表 7→8 个（新增 SessionEnd）；WSL hook 示例追加 SessionEnd；阶段5 hook 配置追加 SessionEnd；阶段7 完成告知 7→8；行为节新增「关闭 CC 自动摘行」和「空了整窗隐藏」两条。**仅 WSL2 验证**，native Windows 未测试。
+  - `README.md`：架构图 hook 列表补 SessionEnd (7→8)；行为节同步新增「关闭 CC 自动摘行」和「空了整窗隐藏」。
 - **灵动岛收起/展开交互**：在灵动岛底部中间添加小尖尖按钮（▲/▼），支持手动收起/展开。收起后窗口缩小至 30px 高度，只显示小尖尖按钮；展开时恢复正常高度并显示所有胶囊行。交互逻辑：(1) 点击 ▲ 手动收起，(2) 点击 ▼ 手动展开，(3) 收起状态下有新状态更新时自动展开。状态仅内存态，不持久化。涉及文件：
   - `island.html.mjs`：新增 `#collapse-btn` 按钮样式与 SVG 图标、`body.collapsed` CSS 折叠动画（300ms cubic-bezier）、前端状态管理（`collapsed` 变量、`setCollapsed()`/`toggleCollapse()` 函数）、通过 `window.islandHost.send()` 向 companion 通知状态变更。
   - `companion.mjs`：新增 `isCollapsed` 全局变量、`WIN_H_COLLAPSED=30` 常量；监听 WebView `message` 事件处理 `collapseChanged` 动作；`syncHeight()` 根据 collapsed 状态选择窗口高度；`update` 消息到达时若处于收起状态则自动展开（调用 `setCollapsed(false)` 并通知前端）。
