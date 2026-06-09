@@ -238,6 +238,7 @@ async function handleHook(json) {
   const sess = getSessionData(sessionId);
 
   log(`hook event=${event} session=${sessionId} cwd=${cwd}`);
+  const ccPid = process.ppid;  // WSL2: wsl.exe 中继 PID; native: 待验证
 
   // Project from cwd (per-session to avoid cross-contamination)
   const project = basename(cwd) || "claude";
@@ -257,6 +258,7 @@ async function handleHook(json) {
         id: sessionId, type: "update",
         project, status: "thinking", detail: "",
         prompt: sess.prompt, startedAt: sess.startedAt, frozenElapsed: null,
+        ccPid,
       });
       break;
     }
@@ -277,6 +279,7 @@ async function handleHook(json) {
         id: sessionId, type: "update",
         project, status: upd.status, detail: upd.detail,
         prompt: sess.prompt || "", startedAt: sess.startedAt, frozenElapsed: null,
+        ccPid,
       });
       break;
     }
@@ -292,12 +295,14 @@ async function handleHook(json) {
           id: sessionId, type: "update",
           project, status: "error", detail: toolName,
           prompt: sess.prompt || "", startedAt: sess.startedAt, frozenElapsed: null,
+          ccPid,
         });
       } else if (sess.activeToolCount === 0 && sess.inAgent) {
         await sendToCompanion({
           id: sessionId, type: "update",
           project, status: "thinking", detail: "",
           prompt: sess.prompt || "", startedAt: sess.startedAt, frozenElapsed: null,
+          ccPid,
         });
       }
       break;
@@ -310,6 +315,7 @@ async function handleHook(json) {
         id: sessionId, type: "update",
         project, status: "waiting", detail: toolName,
         prompt: sess.prompt || "", startedAt: sess.startedAt, frozenElapsed: null,
+        ccPid,
       });
       break;
     }
@@ -322,6 +328,7 @@ async function handleHook(json) {
         id: sessionId, type: "update",
         project, status: "done", detail: "",
         prompt: sess.prompt || "", startedAt: sess.startedAt, frozenElapsed: sess.frozenElapsed,
+        ccPid,
       });
       try {
         if (existsSync(STATE_FILE)) {
@@ -344,6 +351,7 @@ async function handleHook(json) {
         id: sessionId, type: "update",
         project, status: "error", detail: "interrupted",
         prompt: sess.prompt || "", startedAt: sess.startedAt, frozenElapsed: sess.frozenElapsed,
+        ccPid,
       });
       try {
         if (existsSync(STATE_FILE)) {
