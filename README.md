@@ -67,7 +67,7 @@ Agent 会自动完成环境检查、依赖安装、编译和 hooks 配置。
 
 ```
 Claude Code hooks (settings.json)
-  ↓ SessionStart / UserPromptSubmit / PreToolUse / PostToolUse / Stop / StopFailure / PermissionRequest
+  ↓ SessionStart / UserPromptSubmit / PreToolUse / PostToolUse / Stop / StopFailure / PermissionRequest / SessionEnd
 bridge.mjs  (一次性进程，每次 hook 调用)
   ↓ Named pipe
 companion.mjs  (常驻守护进程)
@@ -79,6 +79,8 @@ companion.mjs  (常驻守护进程)
 ## 行为
 
 - **自动启动**: Claude Code 启动时灵动岛自动出现
+- **关闭 CC 自动摘行**: Ctrl+C/Ctrl+D/exit → SessionEnd hook 秒级摘行；直接叉掉终端窗口 → 父进程探活（30s 轮询）兜底
+- **空了整窗隐藏**: 最后一行移除后窗口隐藏（高度 0），companion 守护进程继续存活；下次任意 update 自动复现
 - **状态保留**: done / interrupted / waiting 等状态行保留到该会话下一个事件覆盖（不再定时自动移除）
 - **逐行消除**: 光标移到某行右缘会浮现 × 按钮，点击即从所有屏幕移除该会话行；行只被「下一个事件覆盖」或「× 手动消除」移除，无定时自动消失
 - **收起/展开**: 点击底部小尖尖按钮（▲/▼）手动收起/展开；收起后仅显示按钮（窗口 30px 高）；有新状态更新时自动展开
