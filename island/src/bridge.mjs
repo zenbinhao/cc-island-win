@@ -109,13 +109,14 @@ function connectOnce() {
   return new Promise((resolve) => {
     const s = connect(SOCK);
     let settled = false;
-    s.once("connect", () => { settled = true; resolve(s); });
-    s.once("error", (err) => {
-      if (!settled) { settled = true; log(`connectOnce error: ${err.code || err.message}`); resolve(null); }
-    });
-    setTimeout(() => {
+    // 定时器必须清理:bridge 是一次性进程,残留定时器会挂住事件循环到超时才退出
+    const timer = setTimeout(() => {
       if (!settled) { settled = true; log("connectOnce timeout"); try { s.destroy(); } catch {} resolve(null); }
     }, 2000);
+    s.once("connect", () => { settled = true; clearTimeout(timer); resolve(s); });
+    s.once("error", (err) => {
+      if (!settled) { settled = true; clearTimeout(timer); log(`connectOnce error: ${err.code || err.message}`); resolve(null); }
+    });
   });
 }
 
@@ -397,13 +398,14 @@ function readStdin() {
     if (process.stdin.isTTY) { resolve(""); return; }
     let data = "";
     let settled = false;
-    const done = () => { if (!settled) { settled = true; resolve(data); } };
+    // 兜底定时器要在 stdin 正常结束时清掉,否则一次性进程会被挂满 5s 才退出
+    const done = () => { if (!settled) { settled = true; clearTimeout(timer); resolve(data); } };
     process.stdin.resume();
     process.stdin.setEncoding("utf8");
     process.stdin.on("data", (chunk) => { data += chunk; });
     process.stdin.on("end", done);
     // Safety timeout — 5s should be ample for hook JSON (typically < 1KB)
-    setTimeout(() => { if (data) done(); else { settled = true; resolve(""); } }, 5000);
+    const timer = setTimeout(() => { if (data) done(); else { settled = true; resolve(""); } }, 5000);
   });
 }
 

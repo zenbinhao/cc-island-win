@@ -220,8 +220,6 @@ function removeRowById(id) {
   syncHeight();  // 空了会自动隐藏(在 syncHeight 里统一处理)
   send('window.island.removeRow(' + JSON.stringify(id) + ')');
 }
-  send('window.island.removeRow(' + JSON.stringify(id) + ')');
-}
 
 const server = createServer((sock) => {
   clients.add(sock);

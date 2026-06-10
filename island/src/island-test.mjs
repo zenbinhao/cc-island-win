@@ -3,8 +3,8 @@
 // 模拟 Claude Code hooks stdin JSON，验证 bridge + companion + 渲染逻辑
 // Usage: node island-test.mjs
 
-import { spawn } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { existsSync, readFileSync, writeFileSync, unlinkSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -52,6 +52,26 @@ async function main() {
   // Clean up previous state
   try { unlinkSync(STATE); } catch {}
   await sleep(200);
+
+  // ── Test 0: 全源文件语法门禁 ─────────────────────────────────────────
+  console.log("0. 源文件语法检查 (node --check)");
+  for (const f of readdirSync(HERE).filter((n) => n.endsWith(".mjs"))) {
+    const r = spawnSync(process.execPath, ["--check", join(HERE, f)], {
+      encoding: "utf8", windowsHide: true,
+    });
+    assert(r.status === 0, `${f} 语法合法${r.status === 0 ? "" : " — " + (r.stderr || "").split("\n").slice(0, 2).join(" ")}`);
+  }
+
+  // ── Test 0.5: bridge 退出延迟 ────────────────────────────────────────
+  // 回归保护:残留定时器(readStdin 5s / connectOnce 2s)会把一次性进程挂住
+  console.log("\n0.5 bridge 退出延迟");
+  const t0 = Date.now();
+  await runBridge(JSON.stringify({
+    session_id: "perf-probe", cwd: "/tmp/perf",
+    hook_event_name: "SessionEnd", reason: "other",
+  }));
+  const bridgeMs = Date.now() - t0;
+  assert(bridgeMs < 3000, `单次 hook 调用 ${bridgeMs}ms < 3000ms`);
 
   // ── Test 1: Basic hook dispatch ──────────────────────────────────────
   console.log("1. Hook 事件分派");
