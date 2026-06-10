@@ -197,6 +197,23 @@ async function main() {
   const stateAfter = readState();
   assert(!stateAfter._sessionData?.["sess-end"], "SessionEnd 后 session 数据已删除");
 
+  // ── Test 12: windowSize 纯函数(scale 感知窗口尺寸) ───────────────────
+  console.log("\n12. windowSize 纯函数");
+  const { windowSize, SCALES: SC, ROW_W, ROW_H, HANDLE_H, WIN_MARGIN } = await import("./scales.mjs");
+  assert(windowSize(0, false, "medium").h === 0, "空态高度为 0(隐藏语义)");
+  {
+    const m2 = windowSize(2, false, "medium");
+    assert(m2.h === 2 * ROW_H + HANDLE_H, `medium 2行高度 = ${2 * ROW_H + HANDLE_H} (实际 ${m2.h})`);
+    assert(m2.w === ROW_W + WIN_MARGIN, "medium 宽度 = 行宽+边距");
+  }
+  {
+    const xl = windowSize(1, false, "xlarge");
+    assert(xl.w === Math.ceil((ROW_W + WIN_MARGIN) * SC.xlarge), "xlarge 宽度按 1.35 放大(修宽度裁剪缺陷)");
+    assert(xl.h === Math.ceil(ROW_H * SC.xlarge) + Math.ceil(HANDLE_H * SC.xlarge), "xlarge 高度按 1.35 放大");
+  }
+  assert(windowSize(3, true, "medium").h === HANDLE_H, "收起态只剩手柄高度");
+  assert(windowSize(1, false, "bogus").w === ROW_W + WIN_MARGIN, "未知 scale 回退 medium");
+
   // ── Results ───────────────────────────────────────────────────────────
   console.log(`\n=== 结果: ${passed} 通过, ${failed} 失败 ===`);
   process.exit(failed > 0 ? 1 : 0);
