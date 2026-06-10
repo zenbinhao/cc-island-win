@@ -24,11 +24,11 @@ function assert(cond, label) {
   else { failed++; console.log(`  ✗ ${label}`); }
 }
 
-function runBridge(stdinJson) {
+function runBridge(stdinJson, extraEnv) {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [BRIDGE, "hook"], {
       stdio: ["pipe", "pipe", "pipe"], windowsHide: true,
-      env: { ...process.env, HOME: homedir() },
+      env: { ...process.env, HOME: homedir(), ...(extraEnv || {}) },
     });
     let stdout = "", stderr = "";
     child.stdout.on("data", (d) => { stdout += d.toString(); });
@@ -41,6 +41,19 @@ function runBridge(stdinJson) {
 
 function readState() {
   try { return JSON.parse(readFileSync(STATE, "utf8")); } catch { return {}; }
+}
+
+// 起一个假 companion(独占测试管道),收集 bridge 发来的消息
+async function withFakeCompanion(fn) {
+  const pipe = "//./pipe/claude-island-test-" + process.pid;
+  const messages = [];
+  const server = createServer((sock) => {
+    const rl = createInterface({ input: sock, crlfDelay: Infinity });
+    rl.on("line", (line) => { try { messages.push(JSON.parse(line)); } catch {} });
+  });
+  await new Promise((r) => server.listen(pipe, r));
+  try { await fn(pipe, messages); } finally { server.close(); }
+  return messages;
 }
 
 async function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
@@ -213,6 +226,19 @@ async function main() {
   }
   assert(windowSize(3, true, "medium").h === HANDLE_H, "收起态只剩手柄高度");
   assert(windowSize(1, false, "bogus").w === ROW_W + WIN_MARGIN, "未知 scale 回退 medium");
+
+  // ── Test 13: SOCK env 覆盖(fake companion 收到 update) ───────────────
+  console.log("\n13. SOCK env 覆盖 + fake companion");
+  const msgs13 = await withFakeCompanion(async (pipe) => {
+    await runBridge(JSON.stringify({
+      session_id: "sess-fake", cwd: "/home/fake",
+      hook_event_name: "UserPromptSubmit", prompt: "fake pipe",
+    }), { CLAUDE_ISLAND_SOCK: pipe });
+    await sleep(300);
+  });
+  const upd13 = msgs13.find((m) => m.type === "update" && m.id === "sess-fake");
+  assert(!!upd13, "bridge 经 env 覆盖管道送达 update");
+  assert(upd13?.prompt === "fake pipe", "update 内容正确");
 
   // ── Results ───────────────────────────────────────────────────────────
   console.log(`\n=== 结果: ${passed} 通过, ${failed} 失败 ===`);
