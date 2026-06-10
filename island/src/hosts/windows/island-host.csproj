@@ -3,6 +3,8 @@
     <OutputType>Exe</OutputType>
     <TargetFramework>net8.0-windows</TargetFramework>
     <UseWindowsForms>true</UseWindowsForms>
+    <!-- UIA(System.Windows.Automation)在 WPF 程序集里;pane 级聚焦需要 -->
+    <UseWPF>true</UseWPF>
     <RootNamespace>ClaudeIsland</RootNamespace>
     <AssemblyName>island-host-win</AssemblyName>
     <Nullable>enable</Nullable>

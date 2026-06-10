@@ -6,6 +6,12 @@
 ## [Unreleased]
 
 ### Added
+- **跳转升级为 pane 级精确聚焦**（窗口级跳转的后继增强,用户点名:多 pane 下「拉起窗口」不够,要直接落焦到那个 CC 的输入行）:
+  - 捕获端:`captureFg` 除前台 HWND 外,同时取 **UIA 焦点元素的 RuntimeId + ClassName**。坑:`AutomationElement.FocusedElement` 在 WT 上停在 HWND 级壳 `Windows.UI.Input.InputSite.WindowClass`(每窗口一个,不到 pane)——需 `FindFirst(Descendants, HasKeyboardFocus=true)` 向下钻到真正的 `TermControl`。
+  - 聚焦端:`focusWindow` 带 `paneId/paneClass`,拉起窗口后在其 UIA 子树内按 ClassName 缩小范围、`Automation.Compare` 比对 RuntimeId 找回该 pane → `SetFocus()`;100ms 后校验焦点未落则对元素矩形中心 `SendInput` 真实点击兜底(虚拟桌面绝对坐标,多屏正确)。pane 已关/找不到 → 静默退回窗口级。
+  - RuntimeId 跟元素走:pane 重排/缩放不影响定位。终端无独立输入框,pane 得焦后击键即直达该 CC 输入行。
+  - 工程坑:UIA(System.Windows.Automation)在 WPF 程序集,csproj 需 `UseWPF`,而 UseWPF 会让 SDK 移除隐式 `System.IO` using(补显式 using);跨完整性级别 UIA 被 UIPI 拦截——本机 WT 为管理员运行,interop 全链路同级,畅通。
+  - E2E 场景 2(全自动,14 断言全绿):`wt -w -1` 开双 pane(cmd 各自 title paneA/B,**WT 窗口标题恒等于聚焦 pane 标题**=现成断言器);左 pane 聚焦时捕获(断言 class=TermControl)→ 点右 pane 挪走焦点 → SendInput 点击岛行 → 断言标题变回 paneA。配套坑:提权 WT 标题带「管理员: 」前缀,标题匹配用后缀;PowerShell `-EncodedCommand` 撞 32K 命令行上限,改写临时 .ps1 走 `-File`;清理按 Win32_Process 命令行精准杀 pane 的 cmd。
 - **整行点击跳转到对应 CC 终端窗口**（UI 重写主线,设计 spec 见 `docs/superpowers/specs/2026-06-10-island-ui-rewrite-design.md`）:
   - 捕获:`UserPromptSubmit` 时 bridge 在 update 上带 `captureFg:true` → companion 让常驻 C# host 发 `captureFg` 命令 `GetForegroundWindow()` 捕获该时刻前台窗口 HWND(用户刚按回车,前台即该终端),存 `sessionId → hwnd` 表。**零额外进程**——规避了旧版(2026-06-03 被砍)每 hook 起 PowerShell 遍历进程树的根本病灶,也不做任何终端类型探测。
   - 跳转:整行成为命中矩形,点击行(× 以外)→ webview `focus` 消息 → companion 查表 → host `focusWindow`:`IsWindow` 校验 → `IsIconic` 则 `SW_RESTORE` → ALT trick + `SetForegroundWindow`(AttachThreadInput 兜底)。hover 时行高亮 + ↗ 提示淡入。

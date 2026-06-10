@@ -276,6 +276,7 @@ async function main() {
     w15.cmd({ type: "captureFg", sid: "t15" });
   });
   assert(fg15 && fg15.sid === "t15" && typeof fg15.hwnd === "number", "captureFg 应答含 sid+hwnd");
+  assert(fg15 && typeof fg15.paneId === "string" && typeof fg15.paneClass === "string", "captureFg 应答含 paneId+paneClass(UIA)");
   w15.close();
   await sleep(300);
 

@@ -8,6 +8,8 @@
 
 import { execSync } from "node:child_process";
 import { connect } from "node:net";
+import { writeFileSync, rmSync, readFileSync } from "node:fs";
+import { tmpdir, homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { SOCK } from "./socket-path.mjs";
@@ -21,11 +23,15 @@ function assert(cond, label) {
   else { failed++; console.log("  ✗ " + label); }
 }
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+let _psSeq = 0;
 function ps(script) {
-  const full = "$ProgressPreference='SilentlyContinue'\n" + script;
-  return execSync("powershell -NoProfile -NoLogo -EncodedCommand " +
-    Buffer.from(full, "utf16le").toString("base64"),
-    { encoding: "utf8", timeout: 20000, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] }).trim();
+  // -EncodedCommand 会撞 32K 命令行上限,改写临时 .ps1 走 -File(脚本保持纯 ASCII)
+  const file = join(tmpdir(), `island-e2e-${process.pid}-${_psSeq++}.ps1`);
+  writeFileSync(file, "$ProgressPreference='SilentlyContinue'\n" + script, "utf8");
+  try {
+    return execSync(`powershell -NoProfile -NoLogo -ExecutionPolicy Bypass -File "${file}"`,
+      { encoding: "utf8", timeout: 20000, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] }).trim();
+  } finally { try { rmSync(file); } catch {} }
 }
 function sendMsg(msg) {
   return new Promise((resolve) => {
@@ -53,7 +59,20 @@ public class W {
   [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr l);
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, System.Text.StringBuilder sb, int n);
   public delegate bool EnumProc(IntPtr h, IntPtr l);
+  public static string Title(IntPtr h) { var sb = new System.Text.StringBuilder(512); GetWindowText(h, sb, 512); return sb.ToString(); }
+  public static long FindTitle(string a, string b) {
+    // 后缀匹配:管理员 WT 标题带 "管理员: " 前缀
+    long found = 0;
+    EnumWindows((h, l) => {
+      if (!IsWindowVisible(h)) return true;
+      var t = Title(h);
+      if (t.EndsWith(a) || t.EndsWith(b)) { found = (long)h; return false; }
+      return true;
+    }, IntPtr.Zero);
+    return found;
+  }
   public static List<IntPtr> ByPid(uint pid) {
     var r = new List<IntPtr>();
     EnumWindows((h, l) => { uint p; GetWindowThreadProcessId(h, out p); if (p == pid && IsWindowVisible(h)) r.Add(h); return true; }, IntPtr.Zero);
@@ -124,8 +143,6 @@ $r = New-Object RECT; [void][W]::GetWindowRect([IntPtr]${npHwnd}, [ref]$r)
   });
   await sleep(1000);
   // 从 companion 日志确认捕获到的就是 notepad(区分"捕获错"与"聚焦失败")
-  const { readFileSync } = await import("node:fs");
-  const { homedir } = await import("node:os");
   let capturedHwnd = 0;
   try {
     const lg = readFileSync(join(homedir(), ".claude", "claude-island.log"), "utf8");
@@ -161,6 +178,59 @@ $r = New-Object RECT; [void][W]::GetWindowRect([IntPtr]${npHwnd}, [ref]$r)
   // 7) 清理
   try { ps(`Stop-Process -Name notepad, Notepad -Force -ErrorAction SilentlyContinue`); } catch {}
   await sendMsg({ id: "e2e-jump", type: "remove" });
+
+  // ── 场景 2: Windows Terminal 双 pane,pane 级聚焦 ─────────────────────
+  // WT 窗口标题恒等于当前聚焦 pane 的标题(cmd 用 title 各自命名)——
+  // 标题即「焦点在哪个 pane」的现成断言器。
+  console.log("\n— 场景 2: WT 双 pane,pane 级聚焦 —");
+  ps(String.raw`Start-Process wt -ArgumentList '-w -1 nt cmd /k "title paneA" ; sp -V cmd /k "title paneB"'`);
+  let wtHwnd = 0;
+  for (let i = 0; i < 30 && !wtHwnd; i++) {
+    await sleep(400);
+    wtHwnd = Number(psW(`Write-Output ([W]::FindTitle("paneA","paneB"))`));
+  }
+  assert(wtHwnd > 0, `WT 双 pane 窗口启动 (hwnd=${wtHwnd})`);
+  await sleep(800);
+  const [wl, wtTop, wrgt, wbot] = psW(String.raw`
+$r = New-Object RECT; [void][W]::GetWindowRect([IntPtr]${wtHwnd}, [ref]$r)
+Write-Output "$($r.L),$($r.T),$($r.R),$($r.B)"`).split(",").map(Number);
+  const midY = Math.round(wtTop + (wbot - wtTop) * 0.6);
+  // 点左 pane → 焦点落 paneA
+  psW(`[W]::Click(${Math.round(wl + (wrgt - wl) * 0.25)}, ${midY})`);
+  await sleep(600);
+  assert(psW(`Write-Output ([W]::Title([IntPtr]${wtHwnd}))`).endsWith("paneA"), "左 pane(paneA) 已聚焦");
+  // captureFg:此刻焦点 = paneA 的 TermControl
+  await sendMsg({ id: "e2e-pane", type: "update", project: "e2e-pane", status: "waiting",
+                  detail: "", prompt: "pane-jump", startedAt: Date.now(), captureFg: true });
+  await sleep(1200);
+  let capLine = "";
+  try {
+    const lg = readFileSync(join(homedir(), ".claude", "claude-island.log"), "utf8");
+    capLine = ([...lg.matchAll(/fg captured: e2e-pane → .*$/gm)].pop() || [""])[0];
+  } catch {}
+  const capM = capLine.match(/hwnd=(\d+) pane=([^#]*)#(.*)$/) || [];
+  assert(Number(capM[1]) === wtHwnd && capM[3] && capM[3] !== "-",
+    `捕获到 WT pane (class=${capM[2] || "?"} rid=${(capM[3] || "").slice(0, 24)}…)`);
+  // 点右 pane → 焦点移走
+  psW(`[W]::Click(${Math.round(wl + (wrgt - wl) * 0.75)}, ${midY})`);
+  await sleep(600);
+  assert(psW(`Write-Output ([W]::Title([IntPtr]${wtHwnd}))`).endsWith("paneB"), "右 pane(paneB) 已聚焦(焦点移走)");
+  // 点击岛上的行 → 应把键盘焦点精确还给 paneA
+  const rect3 = islandRect();
+  assert(!!rect3 && rect3.h > 10, "岛窗口随新行复现");
+  psW(`[W]::Click(${Math.round((rect3.l + rect3.r) / 2 - 100 * f)}, ${Math.round(rect3.t + (ROW_H * f) / 2)})`);
+  await sleep(1800);
+  const fgPane = Number(psW(`Write-Output ([int64][W]::GetForegroundWindow())`));
+  const titlePane = psW(`Write-Output ([W]::Title([IntPtr]${wtHwnd}))`);
+  assert(fgPane === wtHwnd, `WT 窗口在前台 (${fgPane})`);
+  assert(titlePane.endsWith("paneA"), `焦点精确回到 paneA —— pane 级聚焦生效 [title=${titlePane}]`);
+  // 清理:按命令行精准杀两个 pane 的 cmd,panes 关完 WT 窗口自关
+  try {
+    ps(String.raw`Get-CimInstance Win32_Process -Filter "Name='cmd.exe'" |
+  Where-Object { $_.CommandLine -match 'title pane[AB]' } |
+  ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`);
+  } catch {}
+  await sendMsg({ id: "e2e-pane", type: "remove" });
 
   console.log(`\n=== 结果: ${passed} 通过, ${failed} 失败 ===`);
   process.exit(failed > 0 ? 1 : 0);

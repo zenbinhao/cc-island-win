@@ -9,10 +9,12 @@
 // Build: dotnet publish -c Release -r win-x64 --self-contained false
 
 using System.Drawing;
+using System.IO; // UseWPF 会移除 SDK 隐式 System.IO using
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Windows.Automation;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
 
@@ -198,6 +200,29 @@ sealed class IslandHost : IDisposable
     [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
     [DllImport("user32.dll")] static extern bool AttachThreadInput(uint a, uint b, bool attach);
     [DllImport("user32.dll")] static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
+
+    // pane 聚焦兜底:SetFocus 不生效时对 pane 中心送一次真实点击(真实输入必得焦点)
+    [StructLayout(LayoutKind.Sequential)] struct SI_MOUSEINPUT { public int dx, dy; public uint mouseData, dwFlags, time; public IntPtr dwExtraInfo; }
+    [StructLayout(LayoutKind.Sequential)] struct SI_INPUT { public uint type; public SI_MOUSEINPUT mi; }
+    [DllImport("user32.dll")] static extern uint SendInput(uint n, SI_INPUT[] p, int cb);
+    [DllImport("user32.dll")] static extern int GetSystemMetrics(int i);
+
+    static void ClickScreen(int x, int y)
+    {
+        // 虚拟桌面绝对坐标(多屏正确);PerMonitorV2 下 UIA 矩形即物理像素,一致
+        int vx = GetSystemMetrics(76), vy = GetSystemMetrics(77);
+        int vw = GetSystemMetrics(78), vh = GetSystemMetrics(79);
+        if (vw <= 1 || vh <= 1) return;
+        var mv = new SI_INPUT[1];
+        mv[0].mi.dx = (int)((x - vx) * 65535.0 / (vw - 1));
+        mv[0].mi.dy = (int)((y - vy) * 65535.0 / (vh - 1));
+        mv[0].mi.dwFlags = 0x0001 | 0x8000 | 0x4000; // MOVE|ABSOLUTE|VIRTUALDESK
+        SendInput(1, mv, Marshal.SizeOf(typeof(SI_INPUT)));
+        Thread.Sleep(40);
+        var dn = new SI_INPUT[1]; dn[0].mi.dwFlags = 0x0002; SendInput(1, dn, Marshal.SizeOf(typeof(SI_INPUT)));
+        Thread.Sleep(30);
+        var up = new SI_INPUT[1]; up[0].mi.dwFlags = 0x0004; SendInput(1, up, Marshal.SizeOf(typeof(SI_INPUT)));
+    }
 
     private IntPtr _mouseHook;
     private LowLevelMouseProc? _mouseProc; // keep delegate alive (GC)
@@ -445,13 +470,41 @@ sealed class IslandHost : IDisposable
                 var fg = GetForegroundWindow();
                 // 永远应答(hwnd=0 表示无效),协议确定性优先;companion 侧忽略 0
                 long hwnd = (fg == IntPtr.Zero || fg == Form.Handle) ? 0 : fg.ToInt64();
-                Stdout.Write(new JsonObject { ["type"] = "fg", ["sid"] = sid, ["hwnd"] = hwnd });
+                // 用户刚按回车:UIA 焦点元素就是那个 pane(WT 分屏的 TermControl)。
+                // 记 RuntimeId(跟元素走,pane 重排/缩放不失效)+ ClassName(缩小回找范围)。
+                string paneId = "", paneClass = "";
+                if (hwnd != 0)
+                {
+                    try
+                    {
+                        var el = AutomationElement.FocusedElement;
+                        if (el != null)
+                        {
+                            // FocusedElement 可能停在 HWND 级壳(如 WT 的
+                            // Windows.UI.Input.InputSite.WindowClass,每窗口一个,
+                            // 不到 pane 粒度)——向下钻到真正持键盘焦点的叶子元素
+                            try
+                            {
+                                var deep = el.FindFirst(TreeScope.Descendants,
+                                    new PropertyCondition(AutomationElement.HasKeyboardFocusProperty, true));
+                                if (deep != null) el = deep;
+                            }
+                            catch { }
+                            paneId = string.Join(",", el.GetRuntimeId());
+                            paneClass = el.Current.ClassName ?? "";
+                        }
+                    }
+                    catch (Exception ex) { Log.Info($"captureFg UIA: {ex.Message}"); }
+                }
+                Stdout.Write(new JsonObject { ["type"] = "fg", ["sid"] = sid, ["hwnd"] = hwnd, ["paneId"] = paneId, ["paneClass"] = paneClass });
                 break;
             }
             case "focusWindow":
             {
                 var hv = json["hwnd"]?.GetValue<long>() ?? 0;
-                if (hv != 0) FocusWindow(hv);
+                var paneId = json["paneId"]?.GetValue<string>() ?? "";
+                var paneClass = json["paneClass"]?.GetValue<string>() ?? "";
+                if (hv != 0) FocusWindow(hv, paneId, paneClass);
                 break;
             }
             default:
@@ -480,7 +533,7 @@ sealed class IslandHost : IDisposable
         Form.HitRects = list.ToArray();
     }
 
-    private void FocusWindow(long hwndVal)
+    private void FocusWindow(long hwndVal, string paneId, string paneClass)
     {
         var h = new IntPtr(hwndVal);
         if (!IsWindow(h)) { Log.Info($"focusWindow: stale hwnd {hwndVal}"); return; }
@@ -496,6 +549,43 @@ sealed class IslandHost : IDisposable
             SetForegroundWindow(h);
             AttachThreadInput(myTid, fgTid, false);
         }
+        if (!string.IsNullOrEmpty(paneId)) FocusPane(h, paneId, paneClass);
+    }
+
+    // 同窗多 pane(如 Windows Terminal 分屏):按捕获时的 UIA RuntimeId 把键盘焦点
+    // 还给那个 pane——终端没有独立输入框,pane 得焦后击键即直达 CC 输入行。
+    private void FocusPane(IntPtr hwnd, string paneId, string paneClass)
+    {
+        try
+        {
+            int[] target = Array.ConvertAll(paneId.Split(','), int.Parse);
+            var root = AutomationElement.FromHandle(hwnd);
+            Condition cond = string.IsNullOrEmpty(paneClass)
+                ? Condition.TrueCondition
+                : new PropertyCondition(AutomationElement.ClassNameProperty, paneClass);
+            AutomationElement? match = null;
+            foreach (AutomationElement el in root.FindAll(TreeScope.Subtree, cond))
+            {
+                int[] rid;
+                try { rid = el.GetRuntimeId(); } catch { continue; }
+                if (Automation.Compare(rid, target)) { match = el; break; }
+            }
+            if (match == null) { Log.Info($"focusPane: runtimeId 未找到(pane 已关?) class={paneClass}"); return; }
+            try { match.SetFocus(); } catch (Exception ex) { Log.Info($"focusPane SetFocus: {ex.Message}"); }
+            Thread.Sleep(100);
+            bool ok = false;
+            try { ok = Automation.Compare(AutomationElement.FocusedElement.GetRuntimeId(), target); } catch { }
+            if (!ok)
+            {
+                var r = match.Current.BoundingRectangle;
+                if (!r.IsEmpty)
+                {
+                    Log.Info("focusPane: SetFocus 未生效,真实点击兜底");
+                    ClickScreen((int)(r.X + r.Width / 2), (int)(r.Y + r.Height / 2));
+                }
+            }
+        }
+        catch (Exception ex) { Log.Info($"focusPane: {ex.Message}"); }
     }
 
     private void InstallMouseHook()

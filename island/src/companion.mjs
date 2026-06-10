@@ -124,15 +124,16 @@ function initWindow(w) {
   for (const js of currentRows.values()) { try { w.send(js); } catch {} }
 }
 
-// 跳转聚焦:sessionId → 前台窗口 HWND(UserPromptSubmit 时刻由 host 捕获)
+// 跳转聚焦:sessionId → { hwnd, paneId, paneClass }(UserPromptSubmit 时刻由 host 捕获;
+// paneId 是 UIA RuntimeId,定位同窗多 pane 里的那个 TermControl)
 const hwndBySession = new Map();
 function hostWin() { for (const w of wins) if (w._ready) return w; return null; }
 function focusSession(id) {
-  const hwnd = hwndBySession.get(id);
-  log("info", `focus id=${id} hwnd=${hwnd || "none"}`);
-  if (!hwnd) return;
+  const t = hwndBySession.get(id);
+  log("info", `focus id=${id} hwnd=${t ? t.hwnd : "none"} pane=${t ? (t.paneClass || "-") + "#" + (t.paneId || "-") : "-"}`);
+  if (!t) return;
   const hw = hostWin();
-  if (hw) hw.cmd({ type: "focusWindow", hwnd });
+  if (hw) hw.cmd({ type: "focusWindow", hwnd: t.hwnd, paneId: t.paneId, paneClass: t.paneClass });
 }
 
 function openIslandWindow(screenPref) {
@@ -168,8 +169,12 @@ function openIslandWindow(screenPref) {
   });
   w.on("fg", (m) => {
     if (m && typeof m.sid === "string" && typeof m.hwnd === "number" && m.hwnd > 0) {
-      hwndBySession.set(m.sid, m.hwnd);
-      log("info", `fg captured: ${m.sid} → hwnd=${m.hwnd}`);
+      hwndBySession.set(m.sid, {
+        hwnd: m.hwnd,
+        paneId: typeof m.paneId === "string" ? m.paneId : "",
+        paneClass: typeof m.paneClass === "string" ? m.paneClass : "",
+      });
+      log("info", `fg captured: ${m.sid} → hwnd=${m.hwnd} pane=${(m.paneClass || "-")}#${(m.paneId || "-")}`);
     }
   });
   w.on("closed", () => {
