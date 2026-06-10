@@ -46,6 +46,7 @@ class Config
     public bool ClickThrough;
     public bool NoDock;
     public bool Hidden;
+    public string ScreenPref = "primary";
 
     public static Config Parse(string[] args)
     {
@@ -57,6 +58,7 @@ class Config
                 case "--width":  if (++i < args.Length && int.TryParse(args[i], out var w)) c.Width = w; break;
                 case "--height": if (++i < args.Length && int.TryParse(args[i], out var h)) c.Height = h; break;
                 case "--title":  if (++i < args.Length) c.Title = args[i]; break;
+                case "--screen": if (++i < args.Length) c.ScreenPref = args[i]; break;
                 case "--x":      if (++i < args.Length && int.TryParse(args[i], out var x)) c.X = x; break;
                 case "--y":      if (++i < args.Length && int.TryParse(args[i], out var y)) c.Y = y; break;
                 case "--frameless":     c.Frameless = true; break;
@@ -83,6 +85,9 @@ sealed class IslandForm : Form
     const int WM_NCHITTEST  = 0x0084;
     const int HTTRANSPARENT = -1;
     const int HTCLIENT      = 1;
+    const int WM_DISPLAYCHANGE = 0x007E;
+
+    public string ScreenPref = "primary";
 
     // Hittable rectangles in client pixels — set from WebView "hitrects" messages.
     // The WH_MOUSE_LL hook in IslandHost tests clicks/hover against these. The window
@@ -132,6 +137,17 @@ sealed class IslandForm : Form
             }
             m.Result = (IntPtr)HTTRANSPARENT;
             return;
+        }
+
+        if (m.Msg == WM_DISPLAYCHANGE)
+        {
+            // 分辨率/拓扑变化:按既定屏幕偏好重新顶部居中
+            BeginInvoke(() =>
+            {
+                var scr = IslandHost.PickScreen(ScreenPref);
+                Left = scr.Bounds.X + (scr.Bounds.Width - Width) / 2;
+                Top = scr.Bounds.Y;
+            });
         }
 
         base.WndProc(ref m);
@@ -235,7 +251,17 @@ sealed class IslandHost : IDisposable
         }
 
         if (config.X.HasValue && config.Y.HasValue)
+        {
             Form.Location = new Point(config.X.Value, config.Y.Value);
+        }
+        else
+        {
+            // 自定位:按 --screen 偏好顶部居中(几何解析在 host 内完成,JS 侧无需 PowerShell)
+            var scr = PickScreen(config.ScreenPref);
+            Form.StartPosition = FormStartPosition.Manual;
+            Form.Location = new Point(scr.Bounds.X + (scr.Bounds.Width - config.Width) / 2, scr.Bounds.Y);
+        }
+        Form.ScreenPref = config.ScreenPref;
 
         if (config.Hidden)
             Form.Opacity = 0;
@@ -262,6 +288,18 @@ sealed class IslandHost : IDisposable
         Form.FormClosing += (_, _) => CloseAndExit();
 
         _ = Task.Run(ReadStdinAsync);
+    }
+
+    internal static Screen PickScreen(string pref)
+    {
+        var all = Screen.AllScreens;
+        if (pref == "active")
+        {
+            var pos = Cursor.Position;
+            foreach (var s in all) if (s.Bounds.Contains(pos)) return s;
+        }
+        if (int.TryParse(pref, out var idx) && idx >= 1 && idx <= all.Length) return all[idx - 1];
+        return Screen.PrimaryScreen ?? all[0];
     }
 
     private void ApplyExtendedStyles()

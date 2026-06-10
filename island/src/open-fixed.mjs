@@ -81,6 +81,7 @@ export function openFixed(html, options = {}) {
   if (options.width != null)  args.push("--width", String(options.width));
   if (options.height != null) args.push("--height", String(options.height));
   if (options.title != null)  args.push("--title", options.title);
+  if (options.screen != null) args.push("--screen", String(options.screen));
   if (options.frameless)    args.push("--frameless");
   if (options.floating)     args.push("--floating");
   if (options.transparent)  args.push("--transparent");
