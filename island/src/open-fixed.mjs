@@ -44,6 +44,8 @@ class FixedWindow extends EventEmitter {
             this.emit("ready", msg);
           }
           break;
+        case "screens": this.emit("screens", msg.count); break;
+        case "fg": this.emit("fg", msg); break;
         case "message": this.emit("message", msg.data); break;
         case "click": this.emit("click"); break;
         case "closed":
@@ -67,6 +69,7 @@ class FixedWindow extends EventEmitter {
   }
 
   send(js)      { this.#write({ type: "eval", js }); }
+  cmd(obj)      { this.#write(obj); }
   setHTML(html) { this.#write({ type: "html", html: Buffer.from(html).toString("base64") }); }
   resize(w, h)  { this.#write({ type: "resize", width: w, height: h }); }
   close()       { this.#write({ type: "close" }); }

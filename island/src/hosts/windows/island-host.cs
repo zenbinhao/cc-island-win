@@ -171,6 +171,18 @@ sealed class IslandHost : IDisposable
     [DllImport("user32.dll")] static extern IntPtr CallNextHookEx(IntPtr h, int nCode, IntPtr wParam, IntPtr lParam);
     [DllImport("kernel32.dll", CharSet = CharSet.Auto)] static extern IntPtr GetModuleHandle(string? name);
 
+    // ── 跳转聚焦:捕获前台窗口 + 拉起目标窗口 ──
+    const int SW_RESTORE = 9;
+    [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr h);
+    [DllImport("user32.dll")] static extern bool IsWindow(IntPtr h);
+    [DllImport("user32.dll")] static extern bool IsIconic(IntPtr h);
+    [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr h, int cmd);
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+    [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
+    [DllImport("user32.dll")] static extern bool AttachThreadInput(uint a, uint b, bool attach);
+    [DllImport("user32.dll")] static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
+
     private IntPtr _mouseHook;
     private LowLevelMouseProc? _mouseProc; // keep delegate alive (GC)
     private double _dpr = 1.0;
@@ -386,6 +398,24 @@ sealed class IslandHost : IDisposable
                 });
                 break;
             }
+            case "screens":
+                Stdout.Write(new JsonObject { ["type"] = "screens", ["count"] = Screen.AllScreens.Length });
+                break;
+            case "captureFg":
+            {
+                var sid = json["sid"]?.GetValue<string>() ?? "";
+                var fg = GetForegroundWindow();
+                // 永远应答(hwnd=0 表示无效),协议确定性优先;companion 侧忽略 0
+                long hwnd = (fg == IntPtr.Zero || fg == Form.Handle) ? 0 : fg.ToInt64();
+                Stdout.Write(new JsonObject { ["type"] = "fg", ["sid"] = sid, ["hwnd"] = hwnd });
+                break;
+            }
+            case "focusWindow":
+            {
+                var hv = json["hwnd"]?.GetValue<long>() ?? 0;
+                if (hv != 0) FocusWindow(hv);
+                break;
+            }
             default:
                 Log.Info($"Unknown command: {type}");
                 break;
@@ -410,6 +440,24 @@ sealed class IslandHost : IDisposable
             list.Add(new Rectangle(x, y, w, h));
         }
         Form.HitRects = list.ToArray();
+    }
+
+    private void FocusWindow(long hwndVal)
+    {
+        var h = new IntPtr(hwndVal);
+        if (!IsWindow(h)) { Log.Info($"focusWindow: stale hwnd {hwndVal}"); return; }
+        if (IsIconic(h)) ShowWindow(h, SW_RESTORE);
+        // ALT 按键 trick:让系统认为本进程刚收到键输入,解除 SetForegroundWindow 前台锁
+        keybd_event(0x12, 0, 0, UIntPtr.Zero);
+        keybd_event(0x12, 0, 2, UIntPtr.Zero); // KEYEVENTF_KEYUP
+        if (!SetForegroundWindow(h))
+        {
+            uint fgTid = GetWindowThreadProcessId(GetForegroundWindow(), out _);
+            uint myTid = GetCurrentThreadId();
+            AttachThreadInput(myTid, fgTid, true);
+            SetForegroundWindow(h);
+            AttachThreadInput(myTid, fgTid, false);
+        }
     }
 
     private void InstallMouseHook()

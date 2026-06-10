@@ -257,6 +257,28 @@ async function main() {
   assert(prompt14?.captureFg === true, "UserPromptSubmit update 带 captureFg:true");
   assert(tool14 && tool14.captureFg === undefined, "PreToolUse update 不带 captureFg");
 
+  // ── Test 15: host 原生协议(screens / captureFg) ──────────────────────
+  console.log("\n15. host 原生协议");
+  const { openFixed } = await import("./open-fixed.mjs");
+  const w15 = openFixed("<html><body></body></html>", {
+    width: 200, height: 60, x: 0, y: 0,
+    frameless: true, transparent: true, hidden: true, noDock: true,
+  });
+  const count15 = await new Promise((resolve) => {
+    const to = setTimeout(() => resolve(null), 20000);
+    w15.on("ready", () => w15.cmd({ type: "screens" }));
+    w15.on("screens", (c) => { clearTimeout(to); resolve(c); });
+  });
+  assert(typeof count15 === "number" && count15 >= 1, `screens 返回屏数 (${count15})`);
+  const fg15 = await new Promise((resolve) => {
+    const to = setTimeout(() => resolve(null), 5000);
+    w15.on("fg", (m) => { clearTimeout(to); resolve(m); });
+    w15.cmd({ type: "captureFg", sid: "t15" });
+  });
+  assert(fg15 && fg15.sid === "t15" && typeof fg15.hwnd === "number", "captureFg 应答含 sid+hwnd");
+  w15.close();
+  await sleep(300);
+
   // ── Results ───────────────────────────────────────────────────────────
   console.log(`\n=== 结果: ${passed} 通过, ${failed} 失败 ===`);
   process.exit(failed > 0 ? 1 : 0);
