@@ -16,7 +16,6 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const BRIDGE = join(HERE, "bridge.mjs");
 const STATE = join(homedir(), ".claude", "claude-island-state.json");
 const LOG_FILE = join(homedir(), ".claude", "claude-island.log");
-const PASS = 0, FAIL = 0;
 let passed = 0, failed = 0;
 
 function assert(cond, label) {
@@ -174,7 +173,7 @@ async function main() {
 
   // ── Test 9: deadRowIds 纯函数 ────────────────────────────────────────
   console.log("\n9. deadRowIds 纯函数(探活逻辑)");
-  // 动态导入 liveness.mjs(还不存在)
+  // 动态导入 liveness.mjs
   const { deadRowIds } = await import("./liveness.mjs");
 
   const pids = new Map([["a", 100], ["b", 200], ["c", 300]]);
@@ -239,6 +238,24 @@ async function main() {
   const upd13 = msgs13.find((m) => m.type === "update" && m.id === "sess-fake");
   assert(!!upd13, "bridge 经 env 覆盖管道送达 update");
   assert(upd13?.prompt === "fake pipe", "update 内容正确");
+
+  // ── Test 14: UserPromptSubmit 带 captureFg,工具事件不带 ─────────────
+  console.log("\n14. captureFg 标志");
+  const msgs14 = await withFakeCompanion(async (pipe) => {
+    await runBridge(JSON.stringify({
+      session_id: "sess-fg", cwd: "/home/fg",
+      hook_event_name: "UserPromptSubmit", prompt: "capture me",
+    }), { CLAUDE_ISLAND_SOCK: pipe });
+    await runBridge(JSON.stringify({
+      session_id: "sess-fg", cwd: "/home/fg",
+      hook_event_name: "PreToolUse", tool_name: "Read", tool_input: { file_path: "/a.txt" },
+    }), { CLAUDE_ISLAND_SOCK: pipe });
+    await sleep(300);
+  });
+  const prompt14 = msgs14.find((m) => m.type === "update" && m.status === "thinking" && m.prompt === "capture me");
+  const tool14 = msgs14.find((m) => m.type === "update" && m.status === "reading");
+  assert(prompt14?.captureFg === true, "UserPromptSubmit update 带 captureFg:true");
+  assert(tool14 && tool14.captureFg === undefined, "PreToolUse update 不带 captureFg");
 
   // ── Results ───────────────────────────────────────────────────────────
   console.log(`\n=== 结果: ${passed} 通过, ${failed} 失败 ===`);

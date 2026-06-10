@@ -19,6 +19,7 @@ import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline";
 import { SOCK } from "./socket-path.mjs";
+import { SCALES as SCALE_MAP } from "./scales.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const COMPANION = join(HERE, "companion.mjs");
@@ -31,7 +32,7 @@ const PID_FILE   = join(PREF_DIR, "claude-island.pid");
 function log(msg) { console.error(`[bridge] ${msg}`); }
 
 // ── Scale presets ───────────────────────────────────────────────────────
-const SCALES = ["small", "medium", "large", "xlarge"];
+const SCALES = Object.keys(SCALE_MAP);
 const DEFAULT_SCALE = "medium";
 function isScale(v) { return typeof v === "string" && SCALES.includes(v); }
 
@@ -230,6 +231,18 @@ function saveSessionData(sessionId, fields) {
   } catch {}
 }
 
+function deleteSessionData(sessionId) {
+  try {
+    if (existsSync(STATE_FILE)) {
+      const data = JSON.parse(readFileSync(STATE_FILE, "utf8"));
+      if (data && data._sessionData && data._sessionData[sessionId]) {
+        delete data._sessionData[sessionId];
+        writeFileSync(STATE_FILE, JSON.stringify(data, null, 2));
+      }
+    }
+  } catch {}
+}
+
 // ── Hook mode: read stdin JSON, dispatch by hook_event_name ─────────────
 async function handleHook(json) {
   const event = json.hook_event_name;
@@ -260,6 +273,7 @@ async function handleHook(json) {
         project, status: "thinking", detail: "",
         prompt: sess.prompt, startedAt: sess.startedAt, frozenElapsed: null,
         ccPid,
+        captureFg: true,  // companion 据此让常驻 host 捕获前台 HWND(点击跳转的锚点)
       });
       break;
     }
@@ -331,15 +345,7 @@ async function handleHook(json) {
         prompt: sess.prompt || "", startedAt: sess.startedAt, frozenElapsed: sess.frozenElapsed,
         ccPid,
       });
-      try {
-        if (existsSync(STATE_FILE)) {
-          const data = JSON.parse(readFileSync(STATE_FILE, "utf8"));
-          if (data && data._sessionData && data._sessionData[sessionId]) {
-            delete data._sessionData[sessionId];
-            writeFileSync(STATE_FILE, JSON.stringify(data, null, 2));
-          }
-        }
-      } catch {}
+      deleteSessionData(sessionId);
       break;
     }
 
@@ -354,15 +360,7 @@ async function handleHook(json) {
         prompt: sess.prompt || "", startedAt: sess.startedAt, frozenElapsed: sess.frozenElapsed,
         ccPid,
       });
-      try {
-        if (existsSync(STATE_FILE)) {
-          const data = JSON.parse(readFileSync(STATE_FILE, "utf8"));
-          if (data && data._sessionData && data._sessionData[sessionId]) {
-            delete data._sessionData[sessionId];
-            writeFileSync(STATE_FILE, JSON.stringify(data, null, 2));
-          }
-        }
-      } catch {}
+      deleteSessionData(sessionId);
       break;
     }
 
@@ -374,15 +372,7 @@ async function handleHook(json) {
         id: sessionId, type: "remove",
       });
       // 删除 session 数据(复用 Stop 逻辑)
-      try {
-        if (existsSync(STATE_FILE)) {
-          const data = JSON.parse(readFileSync(STATE_FILE, "utf8"));
-          if (data && data._sessionData && data._sessionData[sessionId]) {
-            delete data._sessionData[sessionId];
-            writeFileSync(STATE_FILE, JSON.stringify(data, null, 2));
-          }
-        }
-      } catch {}
+      deleteSessionData(sessionId);
       break;
     }
 
