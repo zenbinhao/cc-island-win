@@ -26,7 +26,7 @@ import { execSync } from "node:child_process";
 import { openFixed } from "./open-fixed.mjs";
 import { buildIslandHTML } from "./island.html.mjs";
 import { SOCK } from "./socket-path.mjs";
-import { windowSize } from "./scales.mjs";
+import { SCALES, windowSize } from "./scales.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -90,13 +90,10 @@ function readPref() {
 }
 
 // ── Window setup ───────────────────────────────────────────────────────
-const WIN_W = 640;
-const WIN_H = 52;
-const WIN_H_COLLAPSED = 30;
-
 const _pref = readPref();
 const SCREEN_PREF = typeof _pref.screen === "string" && _pref.screen.length > 0 ? _pref.screen : "primary";
 const THEME_PREF = ["dark","pink","auto"].includes(_pref.theme) ? _pref.theme : "dark";
+let curScale = SCALES[_pref.scale] ? _pref.scale : "medium";
 
 log("info", `screenPref=${SCREEN_PREF} theme=${THEME_PREF}`);
 
@@ -128,13 +125,18 @@ function initWindow(w) {
 }
 
 // 跳转聚焦:sessionId → 前台窗口 HWND(UserPromptSubmit 时刻由 host 捕获)
-// 占位实现,Task 7 落真实现(scale 感知 + focusWindow 路由)
-const SCALE_PREF = "medium";
 const hwndBySession = new Map();
-function focusSession() {}
+function hostWin() { for (const w of wins) if (w._ready) return w; return null; }
+function focusSession(id) {
+  const hwnd = hwndBySession.get(id);
+  log("info", `focus id=${id} hwnd=${hwnd || "none"}`);
+  if (!hwnd) return;
+  const hw = hostWin();
+  if (hw) hw.cmd({ type: "focusWindow", hwnd });
+}
 
 function openIslandWindow(screenPref) {
-  const init = windowSize(1, false, SCALE_PREF);
+  const init = windowSize(1, false, curScale);
   let w;
   try {
     w = openFixed(buildIslandHTML(), {
@@ -199,26 +201,21 @@ if (wins.length === 0) {
 try { mkdirSync(PREF_DIR, { recursive: true }); } catch (e) { log("warn", `mkdir PREF_DIR failed: ${e.message}`); }
 
 const clients = new Set();
-const socketIds = new WeakMap();
 const activeRowIds = new Set();
 const rowPids = new Map();  // id → ccPid, 用于探活
 
+let lastW = -1, lastH = -1;
 function syncHeight() {
-  if (activeRowIds.size === 0) {
-    for (const w of wins) { try { w.resize(WIN_W, 0); } catch {} }
-    return;
-  }
-  if (isCollapsed) {
-    for (const w of wins) { try { w.resize(WIN_W, WIN_H_COLLAPSED); } catch {} }
-  } else {
-    const h = Math.max(52, activeRowIds.size * 36 + 8);
-    for (const w of wins) { try { w.resize(WIN_W, h); } catch {} }
-  }
+  const { w, h } = windowSize(activeRowIds.size, isCollapsed, curScale);
+  if (w === lastW && h === lastH) return; // 尺寸没变就别打扰 host(此前每条 update 都 SetWindowPos)
+  lastW = w; lastH = h;
+  for (const win of wins) { try { win.resize(w, h); } catch {} }
 }
 
 function removeRowById(id) {
   activeRowIds.delete(id);
   rowPids.delete(id);
+  hwndBySession.delete(id);
   currentRows.delete(id);
   syncHeight();  // 空了会自动隐藏(在 syncHeight 里统一处理)
   send('window.island.removeRow(' + JSON.stringify(id) + ')');
@@ -226,7 +223,6 @@ function removeRowById(id) {
 
 const server = createServer((sock) => {
   clients.add(sock);
-  socketIds.set(sock, new Set());
   log("info", `client connected (total=${clients.size})`);
 
   const rl = createInterface({ input: sock, crlfDelay: Infinity });
@@ -234,9 +230,6 @@ const server = createServer((sock) => {
     let msg;
     try { msg = JSON.parse(line); } catch { return; }
     if (!msg || typeof msg.type !== "string") return;
-    if (typeof msg.id === "string" && msg.id) {
-      socketIds.get(sock)?.add(msg.id);
-    }
 
     if (msg.type === "update") {
       if (!msg.id || !VALID_STATUS.has(msg.status)) return;
@@ -244,6 +237,11 @@ const server = createServer((sock) => {
       activeRowIds.add(msg.id);
       if (typeof msg.ccPid === "number" && msg.ccPid > 0) {
         rowPids.set(msg.id, msg.ccPid);
+      }
+      if (msg.captureFg) {
+        // UserPromptSubmit 时刻:用户刚在该终端按下回车,前台窗口就是它
+        const hw = hostWin();
+        if (hw) hw.cmd({ type: "captureFg", sid: msg.id });
       }
       // Auto-expand when new update arrives
       if (isCollapsed) {
@@ -264,7 +262,9 @@ const server = createServer((sock) => {
       return;
     }
     if (msg.type === "scale" && typeof msg.scale === "string") {
+      if (SCALES[msg.scale]) curScale = msg.scale;
       send('window.island.setScale(' + JSON.stringify(msg.scale) + ')');
+      syncHeight(); // 缩放改变窗口宽高(修 large/xlarge 被裁剪)
       return;
     }
     if (msg.type === "theme" && ["dark","pink","auto"].includes(msg.theme)) {
@@ -286,8 +286,6 @@ const server = createServer((sock) => {
 
   sock.on("close", () => {
     clients.delete(sock);
-    const ids = socketIds.get(sock);
-    if (ids) socketIds.delete(sock);
     log("info", `client disconnected (total=${clients.size})`);
   });
   sock.on("error", (e) => {
