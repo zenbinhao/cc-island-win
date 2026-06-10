@@ -6,6 +6,43 @@
 ## [Unreleased]
 
 ### Added
+- **整行点击跳转到对应 CC 终端窗口**（UI 重写主线,设计 spec 见 `docs/superpowers/specs/2026-06-10-island-ui-rewrite-design.md`）:
+  - 捕获:`UserPromptSubmit` 时 bridge 在 update 上带 `captureFg:true` → companion 让常驻 C# host 发 `captureFg` 命令 `GetForegroundWindow()` 捕获该时刻前台窗口 HWND(用户刚按回车,前台即该终端),存 `sessionId → hwnd` 表。**零额外进程**——规避了旧版(2026-06-03 被砍)每 hook 起 PowerShell 遍历进程树的根本病灶,也不做任何终端类型探测。
+  - 跳转:整行成为命中矩形,点击行(× 以外)→ webview `focus` 消息 → companion 查表 → host `focusWindow`:`IsWindow` 校验 → `IsIconic` 则 `SW_RESTORE` → ALT trick + `SetForegroundWindow`(AttachThreadInput 兜底)。hover 时行高亮 + ↗ 提示淡入。
+  - 限制(明示):窗口级粒度,同窗多 pane 无法区分;会话尚无 UserPromptSubmit 捕获时点击静默无效。
+  - host 协议新增 `screens` / `captureFg` / `focusWindow` 三命令与 `fg` 应答;`open-fixed.mjs` 新增 `cmd()` 通用命令与 `screens`/`fg` 事件。
+  - Windows 侧 `C:/Users/Z/.claude/settings.json` 重新配齐 8 个 island hooks(裸 `node`,先备份)——原生 PowerShell/cmd 进入的 CC 同样上岛、同样可跳转。
+- **`scales.mjs`**:尺寸/缩放常量 + `windowSize(rowCount, collapsed, scaleName)` 纯函数,companion 与 island.html 共用(此前 SCALES 在 bridge/HTML 两处重复、窗口尺寸在 companion 写死)。
+- **E2E 自驱回路 `island-e2e.mjs`**:SendInput 真实桌面回归「点击行跳转拉起已最小化窗口 / × 删行 / 空态整窗隐藏」,7 断言全自动(吸收并替代 `_dbgclick.ps1`)。坑:Win11 notepad 是打包应用、启动器 PID 立刻换身,须按进程名轮询找窗口;后台进程 `SetForegroundWindow`/ALT trick 均被前台锁拒,只有 SendInput 真实输入能立前台基准。
+- **PerMonitorV2 DPI 感知**(csproj `ApplicationHighDpiMode`):高缩放屏不再位图模糊、热区坐标 125%/150% 不偏移(此前完全无 DPI 声明)。
+- **WM_DISPLAYCHANGE 重归位**:分辨率/显示器拓扑变化后窗口按既定屏幕偏好自动顶部居中(此前不动)。
+- **host `--screen <primary|active|N>` 自定位**:屏幕几何解析移入 C#(`Screen.AllScreens`),all 模式由 companion 先开主屏、经 `screens` 协议问到屏数再补开其余——解决「没有 host 之前不知道屏数」。
+- **`SOCK` 支持 `CLAUDE_ISLAND_SOCK` env 覆盖**(测试 seam)+ island-test fake companion 基建,新增测试 12–15(windowSize / env 覆盖 / captureFg 标志 / host 原生协议)。
+
+### Changed
+- **`island.html.mjs` 全重写**(动效/交互全权重设计):
+  - 结构:外层 `.row-wrap` 只管 transform 定位(GPU 友好),内层 `.row` 只管观感;行 DOM 只建一次,文本经 refs `textContent` 增量更新,不再整行 innerHTML 重建(无 esc/innerHTML 注入面)。
+  - 动效:进场 滑入+轻弹簧、退场 上移收缩淡出、下方行平滑上滑补位(淘汰 max-height 跳变);状态切到 waiting/done 一次性 pop + 持续 inset 呼吸光;点击按压反馈;收起手柄重绘为 chevron 细柄。
+  - 放大:基准行 460×34 → **540×40**(medium),字号 11.5 → 13;四档 scale 保留并以新基准重算。
+  - TransparencyKey 约束落实:全部发光改 inset/实色,**消灭粉色主题外发光的品红描边**;`STATUS` 与 `THEMES.dark` 整段重复随重写消亡。
+  - 命中区:从「× 右缘竖带」扩展为整行(跳转)+ 收起手柄;× 与 hover 让位行为保留。
+- **companion 窗口尺寸 scale 感知 + no-op 跳过**:`syncHeight` 改用 `windowSize()`(宽高都按当前 scale 计算,`scale` 消息即时重算),同尺寸 resize 直接跳过(此前每条 update 都触发一次 SetWindowPos)。
+- **companion 摆脱 PowerShell**:开窗改传 `--screen`,启动不再执行 2 次 PS 几何查询,companion 启动实测 1400ms → 400ms;`window closed before ready` 时日志输出 WebView2 Runtime 安装指引,`bridge on/toggle` 失败输出同步给出指引。
+- **bridge**:`UserPromptSubmit` payload 带 `captureFg:true`;Stop/StopFailure/SessionEnd 三处重复的删 session 数据块提取为 `deleteSessionData()`;SCALES 改从 `scales.mjs` 导入。
+
+### Fixed
+- **large/xlarge 档窗口裁剪**:旧 `syncHeight` 写死 36px 行高、窗口宽 640 固定,large/xlarge 下行被裁掉(xlarge 行宽 729 > 640)。`windowSize()` 按 scale 计算宽高后修复。
+
+### Removed
+- **`platform.mjs` 删除**:屏幕几何/屏数全部移入 C# host,JS 侧再无平台分支与 PowerShell 依赖。
+- **companion `socketIds` WeakMap 死代码**:维护多年从未被读取。
+- **`_dbgclick.ps1`**(未跟踪调试脚本):SendInput 自驱逻辑吸收进 `island-e2e.mjs` 后删除。
+- island-test 死变量 `const PASS/FAIL` 与「liveness.mjs 还不存在」过时注释。
+
+---
+以下为本轮 UI 重写之前的 Unreleased 记录:
+
+### Added
 - **关闭 CC 自动摘行**：Ctrl+C / Ctrl+D / exit → SessionEnd hook 秒级摘行；直接叉掉终端窗口 → 父进程探活（30s 轮询，process.kill 判活）兜底。细节：
   - `liveness.mjs`：纯函数 `deadRowIds(rowPids, isAlive)` 返回已死进程的 id 列表，`processIsAlive(pid)` 基于 `process.kill(pid,0)` 判活（ESRCH → 死，EPERM/其它 → 保守判活）。配套测试（island-test.mjs 测试 9）。
   - `bridge.mjs`：SessionEnd case 发 `type:remove` 到 companion 并删除 `_sessionData[sessionId]`（复用 Stop 清理逻辑）；handleHook 顶部取 `ccPid = process.ppid`，7 处 update payload 全部加上 ccPid 字段。

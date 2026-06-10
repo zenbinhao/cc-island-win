@@ -24,6 +24,10 @@ node island/src/build.mjs
 # 手动驱动灵动岛（CLI 模式子命令）
 node island/src/bridge.mjs <on|off|toggle|scale|screen|theme|reload|kill|status|init>
 
+# 真实桌面 E2E：SendInput 驱动「点击行跳转 / × 删行 / 空态隐藏」回归。
+# ⚠ 会真实移动鼠标、起一个 notepad 窗口，跑完自动清理；仅手动按需运行。
+node island/src/island-e2e.mjs
+
 # 调试 companion：直接前台运行，stderr 实时打印到终端
 node island/src/companion.mjs
 ```
@@ -34,7 +38,7 @@ node island/src/companion.mjs
 
 ```
 Claude Code hooks (settings.json)
-  ↓ stdin JSON   SessionStart / UserPromptSubmit / PreToolUse / PostToolUse / Stop / StopFailure / PermissionRequest
+  ↓ stdin JSON   SessionStart / UserPromptSubmit / PreToolUse / PostToolUse / Stop / StopFailure / PermissionRequest / SessionEnd
 bridge.mjs           一次性进程：每次 hook 调用启动一次，读 stdin JSON，转成状态消息
   ↓ 命名管道  //./pipe/claude-island   (socket-path.mjs)
 companion.mjs        常驻守护进程：socket 服务端 + 拥有原生窗口，按 session 渲染各自的胶囊行
@@ -48,8 +52,9 @@ island-host-win.exe  C# WinForms + WebView2 原生窗口   (hosts/windows/island
 - **hook 数据走 stdin JSON，不是命令行变量替换。** Claude Code **不会**替换命令里的 `${PROMPT}` / `${TOOL_NAME}`；真实字段在 stdin 的 JSON payload 里。`bridge.mjs` 按 `hook_event_name` 分派，`tool_name` 经 `toolToIsland()` 映射到状态。
 - **bridge 一次性、companion 常驻。** bridge 每次 hook 都是新进程、自身不存状态；跨调用的会话状态持久化在 `~/.claude/claude-island-state.json` 的 `_sessionData[sessionId]` 下，按 session 隔离以免多会话串扰，10 分钟不活跃自动清理。
 - **companion 单例。** 命名管道地址被占用（EADDRINUSE）时，后启动者直接退出，保证全局只有一个守护进程。
-- **平台分支集中在 platform.mjs。** 屏幕几何、窗口定位、屏幕数量全走 PowerShell；其他文件不直接判断 `process.platform`。`SUPPORTED_PLATFORMS` 仅 `win32`。
-- **灵动岛只限 Windows *桌面*，不限 Claude Code 的宿主——WSL2 一样能驱动。** 上面的 `SUPPORTED_PLATFORMS` 仅 `win32` 约束的是 **bridge / companion 必须由 Windows node 运行**，不是要求 Claude Code 跑在 Windows 原生终端。在 WSL2 里，把 hook 命令里的 `node` 换成 `node.exe`（Windows node，WSL interop 可直接调用并原样透传 stdin），bridge 就跑在 Windows 侧，后续链路与纯 Windows 完全一致。已实测：从 WSL 跑 `echo JSON | node.exe <仓库>/island/src/bridge.mjs hook` 能正常开窗、状态实时更新、中文 / emoji prompt 无损，且因 `WT_SESSION` 经 WSLENV 透传，终端仍被识别为 `windows-terminal`。代价：每个 hook 多一次 interop 冷启动开销。**别再断言「WSL 下做不了」。**
+- **屏幕几何 / DPI / 聚焦全部在 C# host 层。** host 以 `--screen <primary|active|N>` 自定位（顶部居中），PerMonitorV2 DPI 感知，WM_DISPLAYCHANGE 自动重新归位；JS 侧不再有任何 PowerShell 或平台分支（`platform.mjs` 已删除）。all 模式由 companion 先开主屏 host、经 `screens` 协议问到屏数再补开其余。
+- **点击跳转链路（整行可点）。** `UserPromptSubmit` 时 bridge 标记 `captureFg` → companion 让常驻 host `GetForegroundWindow` 捕获该终端 HWND 存表（`sessionId → hwnd`）→ 点击行经 `focus` 消息回流 → host `SW_RESTORE` + ALT trick + `SetForegroundWindow` 拉起。窗口级粒度；零额外进程（旧版被砍的 PowerShell 进程树探测不许回归）。尺寸常量统一在 `scales.mjs`（companion 与 island.html 共用）。
+- **灵动岛只限 Windows *桌面*，不限 Claude Code 的宿主——WSL2 一样能驱动。** **bridge / companion 必须由 Windows node 运行**，但不要求 Claude Code 跑在 Windows 原生终端。在 WSL2 里，把 hook 命令里的 `node` 换成 `node.exe`（Windows node，WSL interop 可直接调用并原样透传 stdin），bridge 就跑在 Windows 侧，后续链路与纯 Windows 完全一致。已实测：从 WSL 跑 `echo JSON | node.exe <仓库>/island/src/bridge.mjs hook` 能正常开窗、状态实时更新、中文 / emoji prompt 无损，且因 `WT_SESSION` 经 WSLENV 透传，终端仍被识别为 `windows-terminal`。代价：每个 hook 多一次 interop 冷启动开销。**别再断言「WSL 下做不了」。**
 - **发往 C# 主机的 stdin 只传 ASCII。** `open-fixed.mjs` 把 JSON 里的非 ASCII 字符转成 `\uXXXX`，规避 Windows 管道编码导致的 Unicode 损坏。
 - **预编译 exe 有意提交进仓库**（`island/src/hosts/windows/`），让用户免装 .NET SDK 即可运行；`build.mjs` 只在 exe 丢失时用到。`.pdb` 与 WebView2 `*.xml` 文档不入库（见 `.gitignore`）。
 

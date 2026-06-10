@@ -30,6 +30,8 @@ companion.mjs  (常驻守护进程，永不自动退出)
   └─ 渲染透明背景黑色胶囊 HTML
 ```
 
+点击跳转链路：`UserPromptSubmit` 时 bridge 在 update 上标记 `captureFg` → companion 让常驻原生窗口捕获当时的前台窗口 HWND（用户刚按回车，前台即该终端）→ 点击胶囊行 → 原生窗口 `SetForegroundWindow` 拉起对应终端（已最小化则先还原）。零额外进程、不探测终端类型；粒度为窗口级（同窗多 pane 无法区分）。
+
 ## 目录结构
 
 所有源文件位于本 skill 目录下的 `src/` 子目录：
@@ -41,10 +43,12 @@ companion.mjs  (常驻守护进程，永不自动退出)
 | `src/build.mjs` | 编译原生主机二进制文件 |
 | `src/island.html.mjs` | WebView 内渲染的 HTML/CSS/JS |
 | `src/open-fixed.mjs` | 原生主机进程的 spawn 封装 |
-| `src/platform.mjs` | 平台抽象层（屏幕检测、窗口定位） |
-| `src/socket-path.mjs` | IPC 路径定义 |
+| `src/scales.mjs` | 尺寸/缩放常量 + 窗口尺寸纯函数（companion 与 HTML 共用） |
+| `src/liveness.mjs` | 进程探活纯函数（关窗自动摘行） |
+| `src/socket-path.mjs` | IPC 路径定义（`CLAUDE_ISLAND_SOCK` 可覆盖，测试用） |
 | `src/island-test.mjs` | 自动化测试脚本 |
-| `src/hosts/windows/` | Windows 原生主机 C# 源码 + 预编译 exe |
+| `src/island-e2e.mjs` | 真实桌面 E2E（SendInput 驱动跳转/×/隐藏回归，会动鼠标） |
+| `src/hosts/windows/` | Windows 原生主机 C# 源码 + 预编译 exe（屏幕几何/DPI/聚焦都在这层） |
 
 **脚本根目录**：所有命令执行前，先将路径定位到 `~/.claude/skills/island/`，然后使用 `src/` 子目录下的脚本。
 
@@ -276,7 +280,11 @@ node ~/.claude/skills/island/src/bridge.mjs status
 
 ### 窗口位置不对
 
-查看 log 中的 `screenGeo` 行，建议用户尝试 `/island screen primary` 或 `/island screen active`。
+屏幕几何由原生窗口按 `--screen` 偏好自行解析（分辨率变化会自动重新归位）。建议用户尝试 `/island screen primary` 或 `/island screen active`，再 `/island reload`。
+
+### 点击行跳转无反应
+
+跳转依赖该会话**提交过 prompt**（UserPromptSubmit 时刻捕获前台窗口句柄）。若会话从未提交过 prompt、或对应终端窗口已关闭，点击行不会有动作（静默忽略）。同一终端窗口内多个 pane 无法区分——跳转只到窗口级。
 
 ### companion 进程残留
 
@@ -290,9 +298,12 @@ node ~/.claude/skills/island/src/bridge.mjs status
 - **关闭 CC 自动摘行**: Ctrl+C/Ctrl+D/exit → SessionEnd hook 秒级摘行；直接叉掉终端窗口 → 父进程探活（30s 轮询，process.kill 判活）兜底。**仅 WSL2 验证**，native Windows 未测试。
 - **空了整窗隐藏**: 最后一行移除后窗口隐藏（resize 0 高），companion 守护进程继续存活；下次任意 update 自动复现。
 - **自动出现**: 发送消息后，状态行立即显示（UserPromptSubmit hook）。
-- **状态保留**: done（完成）、interrupted（中断）、waiting（等待确认）等状态行不再定时自动移除——会一直保留到该会话的下一个事件把它覆盖（例如完成后再次发消息翻回「思考中」）。多 pane 下灵动岛即一块持续的会话状态看板。
-- **逐行消除**: 光标移到某行右缘会浮现 × 按钮，点击即从所有屏幕移除该会话行；行只被「下一个事件覆盖」或「× 手动消除」移除，无定时自动消失。整窗关闭仍用 `/island kill`。
-- **收起/展开**: 点击底部中间的小尖尖按钮（▲ 收起 / ▼ 展开）可手动收起灵动岛。收起后窗口缩小至 30px 高度，仅显示按钮；有新状态更新时自动展开。状态为内存态，不持久化。
+- **点击跳转**: 点击某行（× 以外任意位置）把该会话所在终端窗口拉到前台，已最小化会先还原；hover 时行高亮并淡入 ↗ 提示。窗口级粒度，同窗多 pane 无法区分；会话尚无 UserPromptSubmit 捕获时点击无效果。
+- **状态保留**: done（完成）、interrupted（中断）、waiting（等待确认）等状态行不再定时自动移除——会一直保留到该会话的下一个事件把它覆盖（例如完成后再次发消息翻回「思考中」）。多 pane 下灵动岛即一块持续的会话状态看板。waiting/done 行有 inset 呼吸光强调，状态切换时一次性 pop。
+- **逐行消除**: 光标悬停某行浮现右缘 × 按钮（右侧元信息左移让位），点击即从所有屏幕移除该会话行；行只被「下一个事件覆盖」或「× 手动消除」移除，无定时自动消失。整窗关闭仍用 `/island kill`。
+- **收起/展开**: 点击底部中间的手柄（chevron 朝上=收起 / 朝下=展开）可手动收起灵动岛。收起后窗口仅剩手柄高度；有新状态更新时自动展开。状态为内存态，不持久化。
+- **尺寸与缩放**: 基准行 540×40（medium），`scale` 四档（small/medium/large/xlarge），窗口宽高随档位重算（`src/scales.mjs` 统一定义）。
+- **DPI 与多屏**: 原生窗口 PerMonitorV2 DPI 感知；WM_DISPLAYCHANGE（分辨率/拓扑变化）后按屏幕偏好自动重新归位。
 - **多会话**: 每个 Claude Code 实例有独立的 sessionId，灵动岛会堆叠显示各行。
 - **永久常驻**: companion 不会自动退出，灵动岛窗口在屏幕顶部持续显示。关闭需用 `/island kill`。
 - **重启恢复**: 电脑重启后，下次打开 Claude Code 时 SessionStart hook 自动启动灵动岛，无需手动操作。
