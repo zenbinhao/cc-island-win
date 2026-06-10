@@ -26,7 +26,7 @@ import { execSync } from "node:child_process";
 import { openFixed } from "./open-fixed.mjs";
 import { buildIslandHTML } from "./island.html.mjs";
 import { SOCK } from "./socket-path.mjs";
-import { getScreenGeometry, getScreenCount, computeWindowPosition } from "./platform.mjs";
+import { windowSize } from "./scales.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -100,22 +100,6 @@ const THEME_PREF = ["dark","pink","auto"].includes(_pref.theme) ? _pref.theme : 
 
 log("info", `screenPref=${SCREEN_PREF} theme=${THEME_PREF}`);
 
-// Build list of screen geometries to open windows on
-const screenGeos = [];
-if (SCREEN_PREF === "all") {
-  const count = getScreenCount();
-  log("info", `all-screens mode: detected ${count} screen(s)`);
-  for (let i = 1; i <= count; i++) {
-    screenGeos.push(getScreenGeometry(String(i)));
-  }
-  // Fallback: if count detection failed, use primary
-  if (screenGeos.length === 0) screenGeos.push(getScreenGeometry("primary"));
-} else {
-  screenGeos.push(getScreenGeometry(SCREEN_PREF));
-}
-
-log("info", `windows=${screenGeos.length}`);
-
 // ── Open one window per screen ─────────────────────────────────────────
 // currentRows: id → js string — used to replay state into newly-ready windows
 const currentRows = new Map();
@@ -143,30 +127,31 @@ function initWindow(w) {
   for (const js of currentRows.values()) { try { w.send(js); } catch {} }
 }
 
-for (const geo of screenGeos) {
-  const { x, y } = computeWindowPosition(geo, WIN_W, WIN_H);
-  log("info", `screenGeo=${JSON.stringify(geo)} windowPos=(${x},${y})`);
+// 跳转聚焦:sessionId → 前台窗口 HWND(UserPromptSubmit 时刻由 host 捕获)
+// 占位实现,Task 7 落真实现(scale 感知 + focusWindow 路由)
+const SCALE_PREF = "medium";
+const hwndBySession = new Map();
+function focusSession() {}
+
+function openIslandWindow(screenPref) {
+  const init = windowSize(1, false, SCALE_PREF);
   let w;
   try {
     w = openFixed(buildIslandHTML(), {
-      width: WIN_W, height: WIN_H, x, y,
+      width: init.w, height: init.h, screen: screenPref,
       frameless: true, floating: true, transparent: true,
       clickThrough: true, noDock: true,
     });
-  } catch (e) {
-    log("fatal", `openFixed failed for screen (${x},${y}): ${e.message}`);
-    continue;
-  }
+  } catch (e) { log("fatal", `openFixed failed (screen=${screenPref}): ${e.message}`); return null; }
   w._ready = false;
   wins.push(w);
-
   w.on("ready", (info) => {
     w._ready = true;
-    log("info", `window ready at (${x},${y}): ${JSON.stringify(info)}`);
+    log("info", `window ready (screen=${screenPref}): ${JSON.stringify(info)}`);
     initWindow(w);
   });
   w.on("message", (data) => {
-    // Handle messages from WebView (collapse button, per-row dismiss)
+    // Handle messages from WebView (collapse button, per-row dismiss, row focus)
     if (!data || typeof data !== "object") return;
     if (data.action === "collapseChanged") {
       isCollapsed = data.collapsed;
@@ -175,16 +160,34 @@ for (const geo of screenGeos) {
     } else if (data.type === "dismiss" && typeof data.id === "string" && data.id) {
       log("info", `dismiss id=${data.id}`);
       removeRowById(data.id);
+    } else if (data.type === "focus" && typeof data.id === "string" && data.id) {
+      focusSession(data.id);
+    }
+  });
+  w.on("fg", (m) => {
+    if (m && typeof m.sid === "string" && typeof m.hwnd === "number" && m.hwnd > 0) {
+      hwndBySession.set(m.sid, m.hwnd);
+      log("info", `fg captured: ${m.sid} → hwnd=${m.hwnd}`);
     }
   });
   w.on("closed", () => {
-    log("info", `window closed at (${x},${y})`);
+    if (!w._ready) log("fatal", "window closed before ready — WebView2 Runtime 可能缺失,安装: https://developer.microsoft.com/en-us/microsoft-edge/webview2/");
+    log("info", `window closed (screen=${screenPref})`);
     cleanup();
     process.exit(0);
   });
-  w.on("error", (e) => {
-    log("error", `window error at (${x},${y}): ${e?.message || e}`);
+  w.on("error", (e) => { log("error", `window error (screen=${screenPref}): ${e?.message || e}`); });
+  return w;
+}
+
+const firstWin = openIslandWindow(SCREEN_PREF === "all" ? "primary" : SCREEN_PREF);
+if (SCREEN_PREF === "all" && firstWin) {
+  // 先有 host 才知道屏数:经 screens 协议问到后再补开其余屏
+  firstWin.on("screens", (count) => {
+    log("info", `all-screens mode: ${count} screen(s)`);
+    for (let i = 2; i <= Math.min(count, 9); i++) openIslandWindow(String(i));
   });
+  firstWin.on("ready", () => firstWin.cmd({ type: "screens" }));
 }
 
 if (wins.length === 0) {

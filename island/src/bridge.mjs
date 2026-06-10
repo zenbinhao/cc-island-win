@@ -411,7 +411,7 @@ async function handleCli(cmd, args, state) {
       state.enabled = true;
       writeState(state); writePref(state);
       const ok = await ensureCompanion();
-      console.log(ok ? "Island enabled" : "Island enabled (companion start failed — check log)");
+      console.log(ok ? "Island enabled" : "Island enabled (companion start failed — 查看 ~/.claude/claude-island.log;若含 'WebView2' 字样,需安装 WebView2 Runtime: https://developer.microsoft.com/en-us/microsoft-edge/webview2/)");
       break;
     }
     case "off": case "disable": {
@@ -426,7 +426,7 @@ async function handleCli(cmd, args, state) {
       writeState(state); writePref(state);
       if (state.enabled) {
         const ok = await ensureCompanion();
-        console.log(ok ? "Island enabled" : "Island enabled (companion start failed — check log)");
+        console.log(ok ? "Island enabled" : "Island enabled (companion start failed — 查看 ~/.claude/claude-island.log;若含 'WebView2' 字样,需安装 WebView2 Runtime: https://developer.microsoft.com/en-us/microsoft-edge/webview2/)");
       } else {
         await sendToCompanion({ id: cliSessionId, type: "remove" });
         console.log("Island disabled");
