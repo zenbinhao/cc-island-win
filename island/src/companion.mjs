@@ -18,6 +18,7 @@
 import { createServer } from "node:net";
 import { createInterface } from "node:readline";
 import { existsSync, readFileSync, unlinkSync, mkdirSync, appendFileSync, statSync, writeFileSync } from "node:fs";
+import { deadRowIds, processIsAlive } from "./liveness.mjs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -25,7 +26,7 @@ import { execSync } from "node:child_process";
 import { openFixed } from "./open-fixed.mjs";
 import { buildIslandHTML } from "./island.html.mjs";
 import { SOCK } from "./socket-path.mjs";
-import { getScreenGeometry, getScreenCount, computeWindowPosition } from "./platform.mjs";
+import { SCALES, windowSize } from "./scales.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -89,31 +90,12 @@ function readPref() {
 }
 
 // ── Window setup ───────────────────────────────────────────────────────
-const WIN_W = 640;
-const WIN_H = 52;
-const WIN_H_COLLAPSED = 30;
-
 const _pref = readPref();
 const SCREEN_PREF = typeof _pref.screen === "string" && _pref.screen.length > 0 ? _pref.screen : "primary";
 const THEME_PREF = ["dark","pink","auto"].includes(_pref.theme) ? _pref.theme : "dark";
+let curScale = SCALES[_pref.scale] ? _pref.scale : "medium";
 
 log("info", `screenPref=${SCREEN_PREF} theme=${THEME_PREF}`);
-
-// Build list of screen geometries to open windows on
-const screenGeos = [];
-if (SCREEN_PREF === "all") {
-  const count = getScreenCount();
-  log("info", `all-screens mode: detected ${count} screen(s)`);
-  for (let i = 1; i <= count; i++) {
-    screenGeos.push(getScreenGeometry(String(i)));
-  }
-  // Fallback: if count detection failed, use primary
-  if (screenGeos.length === 0) screenGeos.push(getScreenGeometry("primary"));
-} else {
-  screenGeos.push(getScreenGeometry(SCREEN_PREF));
-}
-
-log("info", `windows=${screenGeos.length}`);
 
 // ── Open one window per screen ─────────────────────────────────────────
 // currentRows: id → js string — used to replay state into newly-ready windows
@@ -142,30 +124,51 @@ function initWindow(w) {
   for (const js of currentRows.values()) { try { w.send(js); } catch {} }
 }
 
-for (const geo of screenGeos) {
-  const { x, y } = computeWindowPosition(geo, WIN_W, WIN_H);
-  log("info", `screenGeo=${JSON.stringify(geo)} windowPos=(${x},${y})`);
+// 跳转聚焦:sessionId → { hwnd, paneId, paneClass, tabId }(UserPromptSubmit 时刻由
+// host 捕获;paneId/tabId 是 UIA RuntimeId——pane 定位 TermControl,tab 用于非活动
+// tab 时先切过去)。持久化到磁盘,companion 重启后点击跳转依然可用。
+const FG_FILE = join(PREF_DIR, "claude-island-fg.json");
+const hwndBySession = new Map();
+try {
+  const saved = JSON.parse(readFileSync(FG_FILE, "utf8"));
+  if (saved && typeof saved === "object") {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v && typeof v.hwnd === "number") hwndBySession.set(k, v);
+    }
+    log("info", `fg table loaded: ${hwndBySession.size} entries`);
+  }
+} catch {}
+function saveFgTable() {
+  try { writeFileSync(FG_FILE, JSON.stringify(Object.fromEntries(hwndBySession))); } catch {}
+}
+function hostWin() { for (const w of wins) if (w._ready) return w; return null; }
+function focusSession(id) {
+  const t = hwndBySession.get(id);
+  log("info", `focus id=${id} hwnd=${t ? t.hwnd : "none"} pane=${t ? (t.paneClass || "-") + "#" + (t.paneId || "-") : "-"} tab=#${t ? (t.tabId || "-") : "-"}`);
+  if (!t) return;
+  const hw = hostWin();
+  if (hw) hw.cmd({ type: "focusWindow", hwnd: t.hwnd, paneId: t.paneId, paneClass: t.paneClass, tabId: t.tabId || "" });
+}
+
+function openIslandWindow(screenPref) {
+  const init = windowSize(1, false, curScale);
   let w;
   try {
     w = openFixed(buildIslandHTML(), {
-      width: WIN_W, height: WIN_H, x, y,
+      width: init.w, height: init.h, screen: screenPref,
       frameless: true, floating: true, transparent: true,
       clickThrough: true, noDock: true,
     });
-  } catch (e) {
-    log("fatal", `openFixed failed for screen (${x},${y}): ${e.message}`);
-    continue;
-  }
+  } catch (e) { log("fatal", `openFixed failed (screen=${screenPref}): ${e.message}`); return null; }
   w._ready = false;
   wins.push(w);
-
   w.on("ready", (info) => {
     w._ready = true;
-    log("info", `window ready at (${x},${y}): ${JSON.stringify(info)}`);
+    log("info", `window ready (screen=${screenPref}): ${JSON.stringify(info)}`);
     initWindow(w);
   });
   w.on("message", (data) => {
-    // Handle messages from WebView (collapse button, per-row dismiss)
+    // Handle messages from WebView (collapse button, per-row dismiss, row focus)
     if (!data || typeof data !== "object") return;
     if (data.action === "collapseChanged") {
       isCollapsed = data.collapsed;
@@ -174,16 +177,40 @@ for (const geo of screenGeos) {
     } else if (data.type === "dismiss" && typeof data.id === "string" && data.id) {
       log("info", `dismiss id=${data.id}`);
       removeRowById(data.id);
+    } else if (data.type === "focus" && typeof data.id === "string" && data.id) {
+      focusSession(data.id);
+    }
+  });
+  w.on("fg", (m) => {
+    if (m && typeof m.sid === "string" && typeof m.hwnd === "number" && m.hwnd > 0) {
+      hwndBySession.set(m.sid, {
+        hwnd: m.hwnd,
+        paneId: typeof m.paneId === "string" ? m.paneId : "",
+        paneClass: typeof m.paneClass === "string" ? m.paneClass : "",
+        tabId: typeof m.tabId === "string" ? m.tabId : "",
+      });
+      saveFgTable();
+      log("info", `fg captured: ${m.sid} → hwnd=${m.hwnd} pane=${(m.paneClass || "-")}#${(m.paneId || "-")} tab=#${(m.tabId || "-")}`);
     }
   });
   w.on("closed", () => {
-    log("info", `window closed at (${x},${y})`);
+    if (!w._ready) log("fatal", "window closed before ready — WebView2 Runtime 可能缺失,安装: https://developer.microsoft.com/en-us/microsoft-edge/webview2/");
+    log("info", `window closed (screen=${screenPref})`);
     cleanup();
     process.exit(0);
   });
-  w.on("error", (e) => {
-    log("error", `window error at (${x},${y}): ${e?.message || e}`);
+  w.on("error", (e) => { log("error", `window error (screen=${screenPref}): ${e?.message || e}`); });
+  return w;
+}
+
+const firstWin = openIslandWindow(SCREEN_PREF === "all" ? "primary" : SCREEN_PREF);
+if (SCREEN_PREF === "all" && firstWin) {
+  // 先有 host 才知道屏数:经 screens 协议问到后再补开其余屏
+  firstWin.on("screens", (count) => {
+    log("info", `all-screens mode: ${count} screen(s)`);
+    for (let i = 2; i <= Math.min(count, 9); i++) openIslandWindow(String(i));
   });
+  firstWin.on("ready", () => firstWin.cmd({ type: "screens" }));
 }
 
 if (wins.length === 0) {
@@ -195,28 +222,28 @@ if (wins.length === 0) {
 try { mkdirSync(PREF_DIR, { recursive: true }); } catch (e) { log("warn", `mkdir PREF_DIR failed: ${e.message}`); }
 
 const clients = new Set();
-const socketIds = new WeakMap();
 const activeRowIds = new Set();
+const rowPids = new Map();  // id → ccPid, 用于探活
 
+let lastW = -1, lastH = -1;
 function syncHeight() {
-  if (isCollapsed) {
-    for (const w of wins) { try { w.resize(WIN_W, WIN_H_COLLAPSED); } catch {} }
-  } else {
-    const h = Math.max(52, activeRowIds.size * 36 + 8);
-    for (const w of wins) { try { w.resize(WIN_W, h); } catch {} }
-  }
+  const { w, h } = windowSize(activeRowIds.size, isCollapsed, curScale);
+  if (w === lastW && h === lastH) return; // 尺寸没变就别打扰 host(此前每条 update 都 SetWindowPos)
+  lastW = w; lastH = h;
+  for (const win of wins) { try { win.resize(w, h); } catch {} }
 }
 
 function removeRowById(id) {
   activeRowIds.delete(id);
+  rowPids.delete(id);
+  if (hwndBySession.delete(id)) saveFgTable();
   currentRows.delete(id);
-  syncHeight();
+  syncHeight();  // 空了会自动隐藏(在 syncHeight 里统一处理)
   send('window.island.removeRow(' + JSON.stringify(id) + ')');
 }
 
 const server = createServer((sock) => {
   clients.add(sock);
-  socketIds.set(sock, new Set());
   log("info", `client connected (total=${clients.size})`);
 
   const rl = createInterface({ input: sock, crlfDelay: Infinity });
@@ -224,14 +251,19 @@ const server = createServer((sock) => {
     let msg;
     try { msg = JSON.parse(line); } catch { return; }
     if (!msg || typeof msg.type !== "string") return;
-    if (typeof msg.id === "string" && msg.id) {
-      socketIds.get(sock)?.add(msg.id);
-    }
 
     if (msg.type === "update") {
       if (!msg.id || !VALID_STATUS.has(msg.status)) return;
       log("info", `update id=${msg.id} status=${msg.status} project=${msg.project||''} prompt="${(msg.prompt||'').substring(0,40)}"`);
       activeRowIds.add(msg.id);
+      if (typeof msg.ccPid === "number" && msg.ccPid > 0) {
+        rowPids.set(msg.id, msg.ccPid);
+      }
+      if (msg.captureFg) {
+        // UserPromptSubmit 时刻:用户刚在该终端按下回车,前台窗口就是它
+        const hw = hostWin();
+        if (hw) hw.cmd({ type: "captureFg", sid: msg.id });
+      }
       // Auto-expand when new update arrives
       if (isCollapsed) {
         isCollapsed = false;
@@ -251,7 +283,9 @@ const server = createServer((sock) => {
       return;
     }
     if (msg.type === "scale" && typeof msg.scale === "string") {
+      if (SCALES[msg.scale]) curScale = msg.scale;
       send('window.island.setScale(' + JSON.stringify(msg.scale) + ')');
+      syncHeight(); // 缩放改变窗口宽高(修 large/xlarge 被裁剪)
       return;
     }
     if (msg.type === "theme" && ["dark","pink","auto"].includes(msg.theme)) {
@@ -273,8 +307,6 @@ const server = createServer((sock) => {
 
   sock.on("close", () => {
     clients.delete(sock);
-    const ids = socketIds.get(sock);
-    if (ids) socketIds.delete(sock);
     log("info", `client disconnected (total=${clients.size})`);
   });
   sock.on("error", (e) => {
@@ -296,6 +328,15 @@ server.on("error", (err) => {
 server.listen(SOCK, () => {
   log("info", `listening on ${SOCK}`);
 });
+
+// ── Liveness checker (30s) ─────────────────────────────────────────────
+setInterval(() => {
+  const dead = deadRowIds(rowPids, processIsAlive);
+  for (const id of dead) {
+    log("info", `liveness check: row ${id} pid=${rowPids.get(id)} is dead, removing`);
+    removeRowById(id);
+  }
+}, 30_000);
 
 // ── Cleanup ────────────────────────────────────────────────────────────
 let cleaned = false;

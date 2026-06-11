@@ -6,6 +6,61 @@
 ## [Unreleased]
 
 ### Added
+- **跳转再升级:跨 tab 定位 + 捕获表持久化**(用户实测反馈:同窗多个 WSL2 子窗口,目标在非活动 tab 时不切换):
+  - 根因(日志实证):捕获完全正确(`pane=TermControl#…`),但 **WT 非活动 tab 的 pane 不挂在 UIA 树上**,点击时 `FindAll` 找不到该 RuntimeId → 退窗口级 → 窗口本就在前台,看起来"没反应"。
+  - 修复:`captureFg` 同时记录**所在 TabItem 的 RuntimeId**(tab 头常驻 UIA 树);`focusWindow` 找不到 pane 时,按 TabItem RuntimeId `SelectionItemPattern.Select()` 切 tab、等内容挂回树(350ms)再找 pane 落焦;tab 也找不到才止于窗口级。
+  - 第二个实测漏洞:捕获表原是 companion 内存态,reload 即丢,点击悄无声息没动作。现持久化到 `~/.claude/claude-island-fg.json`(启动加载、捕获/摘行即写)。
+  - E2E 场景 3(全自动):`wt -w -1` 开双 tab(cmd 各自 title tabA/B)→ Ctrl+Tab 切到 tabA 捕获(断言 tab RuntimeId 非空)→ 切回 tabB(目标 pane 脱树)→ SendInput 点击岛行 → 断言标题自动变回 tabA。三场景 21 断言全绿,套件 46。
+- **跳转升级为 pane 级精确聚焦**（窗口级跳转的后继增强,用户点名:多 pane 下「拉起窗口」不够,要直接落焦到那个 CC 的输入行）:
+  - 捕获端:`captureFg` 除前台 HWND 外,同时取 **UIA 焦点元素的 RuntimeId + ClassName**。坑:`AutomationElement.FocusedElement` 在 WT 上停在 HWND 级壳 `Windows.UI.Input.InputSite.WindowClass`(每窗口一个,不到 pane)——需 `FindFirst(Descendants, HasKeyboardFocus=true)` 向下钻到真正的 `TermControl`。
+  - 聚焦端:`focusWindow` 带 `paneId/paneClass`,拉起窗口后在其 UIA 子树内按 ClassName 缩小范围、`Automation.Compare` 比对 RuntimeId 找回该 pane → `SetFocus()`;100ms 后校验焦点未落则对元素矩形中心 `SendInput` 真实点击兜底(虚拟桌面绝对坐标,多屏正确)。pane 已关/找不到 → 静默退回窗口级。
+  - RuntimeId 跟元素走:pane 重排/缩放不影响定位。终端无独立输入框,pane 得焦后击键即直达该 CC 输入行。
+  - 工程坑:UIA(System.Windows.Automation)在 WPF 程序集,csproj 需 `UseWPF`,而 UseWPF 会让 SDK 移除隐式 `System.IO` using(补显式 using);跨完整性级别 UIA 被 UIPI 拦截——本机 WT 为管理员运行,interop 全链路同级,畅通。
+  - E2E 场景 2(全自动,14 断言全绿):`wt -w -1` 开双 pane(cmd 各自 title paneA/B,**WT 窗口标题恒等于聚焦 pane 标题**=现成断言器);左 pane 聚焦时捕获(断言 class=TermControl)→ 点右 pane 挪走焦点 → SendInput 点击岛行 → 断言标题变回 paneA。配套坑:提权 WT 标题带「管理员: 」前缀,标题匹配用后缀;PowerShell `-EncodedCommand` 撞 32K 命令行上限,改写临时 .ps1 走 `-File`;清理按 Win32_Process 命令行精准杀 pane 的 cmd。
+- **整行点击跳转到对应 CC 终端窗口**（UI 重写主线,设计 spec 见 `docs/superpowers/specs/2026-06-10-island-ui-rewrite-design.md`）:
+  - 捕获:`UserPromptSubmit` 时 bridge 在 update 上带 `captureFg:true` → companion 让常驻 C# host 发 `captureFg` 命令 `GetForegroundWindow()` 捕获该时刻前台窗口 HWND(用户刚按回车,前台即该终端),存 `sessionId → hwnd` 表。**零额外进程**——规避了旧版(2026-06-03 被砍)每 hook 起 PowerShell 遍历进程树的根本病灶,也不做任何终端类型探测。
+  - 跳转:整行成为命中矩形,点击行(× 以外)→ webview `focus` 消息 → companion 查表 → host `focusWindow`:`IsWindow` 校验 → `IsIconic` 则 `SW_RESTORE` → ALT trick + `SetForegroundWindow`(AttachThreadInput 兜底)。hover 时行高亮 + ↗ 提示淡入。
+  - 限制(明示):窗口级粒度,同窗多 pane 无法区分;会话尚无 UserPromptSubmit 捕获时点击静默无效。
+  - host 协议新增 `screens` / `captureFg` / `focusWindow` 三命令与 `fg` 应答;`open-fixed.mjs` 新增 `cmd()` 通用命令与 `screens`/`fg` 事件。
+  - Windows 侧 `C:/Users/Z/.claude/settings.json` 重新配齐 8 个 island hooks(裸 `node`,先备份)——原生 PowerShell/cmd 进入的 CC 同样上岛、同样可跳转。
+- **`scales.mjs`**:尺寸/缩放常量 + `windowSize(rowCount, collapsed, scaleName)` 纯函数,companion 与 island.html 共用(此前 SCALES 在 bridge/HTML 两处重复、窗口尺寸在 companion 写死)。
+- **E2E 自驱回路 `island-e2e.mjs`**:SendInput 真实桌面回归「点击行跳转拉起已最小化窗口 / × 删行 / 空态整窗隐藏」,7 断言全自动(吸收并替代 `_dbgclick.ps1`)。坑:Win11 notepad 是打包应用、启动器 PID 立刻换身,须按进程名轮询找窗口;后台进程 `SetForegroundWindow`/ALT trick 均被前台锁拒,只有 SendInput 真实输入能立前台基准。
+- **PerMonitorV2 DPI 感知**(csproj `ApplicationHighDpiMode`):高缩放屏不再位图模糊、热区坐标 125%/150% 不偏移(此前完全无 DPI 声明)。
+- **WM_DISPLAYCHANGE 重归位**:分辨率/显示器拓扑变化后窗口按既定屏幕偏好自动顶部居中(此前不动)。
+- **host `--screen <primary|active|N>` 自定位**:屏幕几何解析移入 C#(`Screen.AllScreens`),all 模式由 companion 先开主屏、经 `screens` 协议问到屏数再补开其余——解决「没有 host 之前不知道屏数」。
+- **`SOCK` 支持 `CLAUDE_ISLAND_SOCK` env 覆盖**(测试 seam)+ island-test fake companion 基建,新增测试 12–15(windowSize / env 覆盖 / captureFg 标志 / host 原生协议)。
+
+### Changed
+- **`island.html.mjs` 全重写**(动效/交互全权重设计):
+  - 结构:外层 `.row-wrap` 只管 transform 定位(GPU 友好),内层 `.row` 只管观感;行 DOM 只建一次,文本经 refs `textContent` 增量更新,不再整行 innerHTML 重建(无 esc/innerHTML 注入面)。
+  - 动效:进场 滑入+轻弹簧、退场 上移收缩淡出、下方行平滑上滑补位(淘汰 max-height 跳变);状态切到 waiting/done 一次性 pop + 持续 inset 呼吸光;点击按压反馈;收起手柄重绘为 chevron 细柄。
+  - 放大:基准行 460×34 → **540×40**(medium),字号 11.5 → 13;四档 scale 保留并以新基准重算。
+  - TransparencyKey 约束落实:全部发光改 inset/实色,**消灭粉色主题外发光的品红描边**;`STATUS` 与 `THEMES.dark` 整段重复随重写消亡。
+  - 命中区:从「× 右缘竖带」扩展为整行(跳转)+ 收起手柄;× 与 hover 让位行为保留。
+- **companion 窗口尺寸 scale 感知 + no-op 跳过**:`syncHeight` 改用 `windowSize()`(宽高都按当前 scale 计算,`scale` 消息即时重算),同尺寸 resize 直接跳过(此前每条 update 都触发一次 SetWindowPos)。
+- **companion 摆脱 PowerShell**:开窗改传 `--screen`,启动不再执行 2 次 PS 几何查询,companion 启动实测 1400ms → 400ms;`window closed before ready` 时日志输出 WebView2 Runtime 安装指引,`bridge on/toggle` 失败输出同步给出指引。
+- **bridge**:`UserPromptSubmit` payload 带 `captureFg:true`;Stop/StopFailure/SessionEnd 三处重复的删 session 数据块提取为 `deleteSessionData()`;SCALES 改从 `scales.mjs` 导入。
+
+### Fixed
+- **large/xlarge 档窗口裁剪**:旧 `syncHeight` 写死 36px 行高、窗口宽 640 固定,large/xlarge 下行被裁掉(xlarge 行宽 729 > 640)。`windowSize()` 按 scale 计算宽高后修复。
+
+### Removed
+- **`platform.mjs` 删除**:屏幕几何/屏数全部移入 C# host,JS 侧再无平台分支与 PowerShell 依赖。
+- **companion `socketIds` WeakMap 死代码**:维护多年从未被读取。
+- **`_dbgclick.ps1`**(未跟踪调试脚本):SendInput 自驱逻辑吸收进 `island-e2e.mjs` 后删除。
+- island-test 死变量 `const PASS/FAIL` 与「liveness.mjs 还不存在」过时注释。
+
+---
+以下为本轮 UI 重写之前的 Unreleased 记录:
+
+### Added
+- **关闭 CC 自动摘行**：Ctrl+C / Ctrl+D / exit → SessionEnd hook 秒级摘行；直接叉掉终端窗口 → 父进程探活（30s 轮询，process.kill 判活）兜底。细节：
+  - `liveness.mjs`：纯函数 `deadRowIds(rowPids, isAlive)` 返回已死进程的 id 列表，`processIsAlive(pid)` 基于 `process.kill(pid,0)` 判活（ESRCH → 死，EPERM/其它 → 保守判活）。配套测试（island-test.mjs 测试 9）。
+  - `bridge.mjs`：SessionEnd case 发 `type:remove` 到 companion 并删除 `_sessionData[sessionId]`（复用 Stop 清理逻辑）；handleHook 顶部取 `ccPid = process.ppid`，7 处 update payload 全部加上 ccPid 字段。
+  - `companion.mjs`：新增 `rowPids` Map (id → ccPid)；update 分支记录 ccPid；30s 定时器调用 `deadRowIds(rowPids, processIsAlive)` 清扫已死进程（零 PowerShell）。
+  - `syncHeight()` 统一处理空态隐藏：`activeRowIds.size === 0` 时 resize 0 高，避免初始空壳和多路径不一致（removeRowById/initWindow/update 全走同一规则）。
+  - `island/SKILL.md`：架构事件列表 7→8 个（新增 SessionEnd）；WSL hook 示例追加 SessionEnd；阶段5 hook 配置追加 SessionEnd；阶段7 完成告知 7→8；行为节新增「关闭 CC 自动摘行」和「空了整窗隐藏」两条。**仅 WSL2 验证**，native Windows 未测试。
+  - `README.md`：架构图 hook 列表补 SessionEnd (7→8)；行为节同步新增「关闭 CC 自动摘行」和「空了整窗隐藏」。
 - **灵动岛收起/展开交互**：在灵动岛底部中间添加小尖尖按钮（▲/▼），支持手动收起/展开。收起后窗口缩小至 30px 高度，只显示小尖尖按钮；展开时恢复正常高度并显示所有胶囊行。交互逻辑：(1) 点击 ▲ 手动收起，(2) 点击 ▼ 手动展开，(3) 收起状态下有新状态更新时自动展开。状态仅内存态，不持久化。涉及文件：
   - `island.html.mjs`：新增 `#collapse-btn` 按钮样式与 SVG 图标、`body.collapsed` CSS 折叠动画（300ms cubic-bezier）、前端状态管理（`collapsed` 变量、`setCollapsed()`/`toggleCollapse()` 函数）、通过 `window.islandHost.send()` 向 companion 通知状态变更。
   - `companion.mjs`：新增 `isCollapsed` 全局变量、`WIN_H_COLLAPSED=30` 常量；监听 WebView `message` 事件处理 `collapseChanged` 动作；`syncHeight()` 根据 collapsed 状态选择窗口高度；`update` 消息到达时若处于收起状态则自动展开（调用 `setCollapsed(false)` 并通知前端）。
@@ -33,6 +88,8 @@
 - `island/src/island.md`：删除 `SKILL.md` 的过时旧副本。该文件内容已与实现脱节（旧脚本路径少了 `src/`、依赖已废弃的 `prompt`/`tool-start`/`tool-end`/`done` 子命令、误述「完成后 5 秒自动消失」实际为 30 秒、缺少 theme / StopFailure / PermissionRequest），留在公开仓库会误导读者。**skill 的唯一权威文档为 `island/SKILL.md`。**
 
 ### Fixed
+- **companion.mjs 语法损坏（仓库级 P0）**: 提交 `4dfb4ac` 在 `removeRowById()` 末尾残留了重复的 `send(...)` 行与多余的 `}`，`node --check` 直接 SyntaxError——companion 完全无法启动。线上未即时暴露是因为屏幕上跑的还是坏提交之前启动的旧进程，下次 reload 即失效。修复：删除重复两行。配套在 `island-test.mjs` 增加 **测试 0：全源文件 `node --check` 语法门禁**，此类损坏今后在测试suite 第一步即被拦截。
+- **bridge 每次 hook 阻塞约 4.6 秒（约 40 倍提速）**: bridge 是一次性进程，但 `readStdin()` 的 5s 兜底定时器与 `connectOnce()` 的 2s 超时定时器在正常完成后**从不清理**，事件循环被挂到定时器到期才退出——实测每次 hook 调用耗时 ~4.6s（node.exe interop 冷启动本身只占 0.06s），而 PreToolUse 等 hook 会阻塞 Claude Code 的工具执行，即每次工具调用都白等数秒。修复：两处定时器在 settle 时 `clearTimeout`。实测单次 hook 4.6s → 0.12s。配套 `island-test.mjs` 测试 0.5：断言单次 hook 调用 < 3s，防回归。
 - **灵动岛收起/× 点击全部失效（架构级修复）**: Task 2 用 `Form.WM_NCHITTEST` + `HitRects` 放行命中区的方案从未生效。根因：窗口靠 `AllowTransparency`+`TransparencyKey`（层叠色键窗口）透明，WebView2 把内容画在独立 DirectComposition 层、**不进入层叠窗口的命中位图**，整张位图都是 Magenta 色键 → 整窗在合成层即被判透明、鼠标直接穿透到桌面，`WM_NCHITTEST` 从未被调用（用 `SendInput` 把光标移到窗口上实测：WebView DOM 与 `Form.WndProc` 都收不到任何鼠标事件）。修复：host 安装 `WH_MOUSE_LL` 全局低级鼠标钩子（UI 线程）——左键落在 WebView 上报的命中矩形（收起按钮 + 逐行 × 右缘竖带，按 `devicePixelRatio` 换算）内 → 调 `window.island.hitClick(x,y)` 执行收起切换 / 删该行并**吞掉该次点击**（连同 up，不泄漏到岛后面的窗口），其余位置照常穿透；移动事件节流 40ms → `window.island.hover(x,y)` 驱动 ×（CSS `:hover` 在此透明穿透窗上无法触发，改用 `.row.hovered` 类）。收起按钮与逐行 × 由此首次真正可点。重编 `island-host-win.exe`/`.dll`。
 - **逐行 × 与执行耗时重叠**: hover 显 × 时把右侧元信息（状态/耗时）整体左移 `20px*scale`（`.row.hovered .slot.right { margin-right }`），× 不再压住执行时间。
 - **`nul` 脏文件反复生成**: `companion.mjs` 的 `taskkill /F /IM island-host-win.exe 2>nul` 在 Linux（如 `island-test.mjs` 用 Linux node 跑 companion）下被 `/bin/sh` 当成文件重定向，生成内容为 `taskkill: not found` 的 `nul` 文件。删除冗余的 `2>nul`（`stdio:"pipe"` 已抑制输出），不再产生该脏文件。

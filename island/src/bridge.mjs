@@ -19,6 +19,7 @@ import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline";
 import { SOCK } from "./socket-path.mjs";
+import { SCALES as SCALE_MAP } from "./scales.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const COMPANION = join(HERE, "companion.mjs");
@@ -31,7 +32,7 @@ const PID_FILE   = join(PREF_DIR, "claude-island.pid");
 function log(msg) { console.error(`[bridge] ${msg}`); }
 
 // ── Scale presets ───────────────────────────────────────────────────────
-const SCALES = ["small", "medium", "large", "xlarge"];
+const SCALES = Object.keys(SCALE_MAP);
 const DEFAULT_SCALE = "medium";
 function isScale(v) { return typeof v === "string" && SCALES.includes(v); }
 
@@ -109,13 +110,14 @@ function connectOnce() {
   return new Promise((resolve) => {
     const s = connect(SOCK);
     let settled = false;
-    s.once("connect", () => { settled = true; resolve(s); });
-    s.once("error", (err) => {
-      if (!settled) { settled = true; log(`connectOnce error: ${err.code || err.message}`); resolve(null); }
-    });
-    setTimeout(() => {
+    // 定时器必须清理:bridge 是一次性进程,残留定时器会挂住事件循环到超时才退出
+    const timer = setTimeout(() => {
       if (!settled) { settled = true; log("connectOnce timeout"); try { s.destroy(); } catch {} resolve(null); }
     }, 2000);
+    s.once("connect", () => { settled = true; clearTimeout(timer); resolve(s); });
+    s.once("error", (err) => {
+      if (!settled) { settled = true; clearTimeout(timer); log(`connectOnce error: ${err.code || err.message}`); resolve(null); }
+    });
   });
 }
 
@@ -229,6 +231,18 @@ function saveSessionData(sessionId, fields) {
   } catch {}
 }
 
+function deleteSessionData(sessionId) {
+  try {
+    if (existsSync(STATE_FILE)) {
+      const data = JSON.parse(readFileSync(STATE_FILE, "utf8"));
+      if (data && data._sessionData && data._sessionData[sessionId]) {
+        delete data._sessionData[sessionId];
+        writeFileSync(STATE_FILE, JSON.stringify(data, null, 2));
+      }
+    }
+  } catch {}
+}
+
 // ── Hook mode: read stdin JSON, dispatch by hook_event_name ─────────────
 async function handleHook(json) {
   const event = json.hook_event_name;
@@ -238,6 +252,7 @@ async function handleHook(json) {
   const sess = getSessionData(sessionId);
 
   log(`hook event=${event} session=${sessionId} cwd=${cwd}`);
+  const ccPid = process.ppid;  // WSL2: wsl.exe 中继 PID; native: 待验证
 
   // Project from cwd (per-session to avoid cross-contamination)
   const project = basename(cwd) || "claude";
@@ -257,6 +272,8 @@ async function handleHook(json) {
         id: sessionId, type: "update",
         project, status: "thinking", detail: "",
         prompt: sess.prompt, startedAt: sess.startedAt, frozenElapsed: null,
+        ccPid,
+        captureFg: true,  // companion 据此让常驻 host 捕获前台 HWND(点击跳转的锚点)
       });
       break;
     }
@@ -277,6 +294,7 @@ async function handleHook(json) {
         id: sessionId, type: "update",
         project, status: upd.status, detail: upd.detail,
         prompt: sess.prompt || "", startedAt: sess.startedAt, frozenElapsed: null,
+        ccPid,
       });
       break;
     }
@@ -292,12 +310,14 @@ async function handleHook(json) {
           id: sessionId, type: "update",
           project, status: "error", detail: toolName,
           prompt: sess.prompt || "", startedAt: sess.startedAt, frozenElapsed: null,
+          ccPid,
         });
       } else if (sess.activeToolCount === 0 && sess.inAgent) {
         await sendToCompanion({
           id: sessionId, type: "update",
           project, status: "thinking", detail: "",
           prompt: sess.prompt || "", startedAt: sess.startedAt, frozenElapsed: null,
+          ccPid,
         });
       }
       break;
@@ -310,6 +330,7 @@ async function handleHook(json) {
         id: sessionId, type: "update",
         project, status: "waiting", detail: toolName,
         prompt: sess.prompt || "", startedAt: sess.startedAt, frozenElapsed: null,
+        ccPid,
       });
       break;
     }
@@ -322,16 +343,9 @@ async function handleHook(json) {
         id: sessionId, type: "update",
         project, status: "done", detail: "",
         prompt: sess.prompt || "", startedAt: sess.startedAt, frozenElapsed: sess.frozenElapsed,
+        ccPid,
       });
-      try {
-        if (existsSync(STATE_FILE)) {
-          const data = JSON.parse(readFileSync(STATE_FILE, "utf8"));
-          if (data && data._sessionData && data._sessionData[sessionId]) {
-            delete data._sessionData[sessionId];
-            writeFileSync(STATE_FILE, JSON.stringify(data, null, 2));
-          }
-        }
-      } catch {}
+      deleteSessionData(sessionId);
       break;
     }
 
@@ -344,16 +358,21 @@ async function handleHook(json) {
         id: sessionId, type: "update",
         project, status: "error", detail: "interrupted",
         prompt: sess.prompt || "", startedAt: sess.startedAt, frozenElapsed: sess.frozenElapsed,
+        ccPid,
       });
-      try {
-        if (existsSync(STATE_FILE)) {
-          const data = JSON.parse(readFileSync(STATE_FILE, "utf8"));
-          if (data && data._sessionData && data._sessionData[sessionId]) {
-            delete data._sessionData[sessionId];
-            writeFileSync(STATE_FILE, JSON.stringify(data, null, 2));
-          }
-        }
-      } catch {}
+      deleteSessionData(sessionId);
+      break;
+    }
+
+    case "SessionEnd": {
+      const reason = json.reason || "(none)";
+      log(`SessionEnd reason=${reason} session=${sessionId}`);
+      // 对所有 reason 执行 remove(clear/resume/logout/prompt_input_exit/other)
+      await sendToCompanion({
+        id: sessionId, type: "remove",
+      });
+      // 删除 session 数据(复用 Stop 逻辑)
+      deleteSessionData(sessionId);
       break;
     }
 
@@ -369,13 +388,14 @@ function readStdin() {
     if (process.stdin.isTTY) { resolve(""); return; }
     let data = "";
     let settled = false;
-    const done = () => { if (!settled) { settled = true; resolve(data); } };
+    // 兜底定时器要在 stdin 正常结束时清掉,否则一次性进程会被挂满 5s 才退出
+    const done = () => { if (!settled) { settled = true; clearTimeout(timer); resolve(data); } };
     process.stdin.resume();
     process.stdin.setEncoding("utf8");
     process.stdin.on("data", (chunk) => { data += chunk; });
     process.stdin.on("end", done);
     // Safety timeout — 5s should be ample for hook JSON (typically < 1KB)
-    setTimeout(() => { if (data) done(); else { settled = true; resolve(""); } }, 5000);
+    const timer = setTimeout(() => { if (data) done(); else { settled = true; resolve(""); } }, 5000);
   });
 }
 
@@ -391,7 +411,7 @@ async function handleCli(cmd, args, state) {
       state.enabled = true;
       writeState(state); writePref(state);
       const ok = await ensureCompanion();
-      console.log(ok ? "Island enabled" : "Island enabled (companion start failed — check log)");
+      console.log(ok ? "Island enabled" : "Island enabled (companion start failed — 查看 ~/.claude/claude-island.log;若含 'WebView2' 字样,需安装 WebView2 Runtime: https://developer.microsoft.com/en-us/microsoft-edge/webview2/)");
       break;
     }
     case "off": case "disable": {
@@ -406,7 +426,7 @@ async function handleCli(cmd, args, state) {
       writeState(state); writePref(state);
       if (state.enabled) {
         const ok = await ensureCompanion();
-        console.log(ok ? "Island enabled" : "Island enabled (companion start failed — check log)");
+        console.log(ok ? "Island enabled" : "Island enabled (companion start failed — 查看 ~/.claude/claude-island.log;若含 'WebView2' 字样,需安装 WebView2 Runtime: https://developer.microsoft.com/en-us/microsoft-edge/webview2/)");
       } else {
         await sendToCompanion({ id: cliSessionId, type: "remove" });
         console.log("Island disabled");
