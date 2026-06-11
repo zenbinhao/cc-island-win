@@ -496,7 +496,29 @@ sealed class IslandHost : IDisposable
                     }
                     catch (Exception ex) { Log.Info($"captureFg UIA: {ex.Message}"); }
                 }
-                Stdout.Write(new JsonObject { ["type"] = "fg", ["sid"] = sid, ["hwnd"] = hwnd, ["paneId"] = paneId, ["paneClass"] = paneClass });
+                // 所在 TabItem 的 RuntimeId:WT 非活动 tab 的 pane 不在 UIA 树里,
+                // 聚焦时要先按它把 tab 切出来(tab 头常驻树,随时可找)
+                string tabId = "";
+                if (hwnd != 0)
+                {
+                    try
+                    {
+                        var winEl = AutomationElement.FromHandle(new IntPtr(hwnd));
+                        foreach (AutomationElement t in winEl.FindAll(TreeScope.Descendants,
+                            new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.TabItem)))
+                        {
+                            try
+                            {
+                                if (t.GetCurrentPattern(SelectionItemPattern.Pattern) is SelectionItemPattern sel
+                                    && sel.Current.IsSelected)
+                                { tabId = string.Join(",", t.GetRuntimeId()); break; }
+                            }
+                            catch { }
+                        }
+                    }
+                    catch (Exception ex) { Log.Info($"captureFg tab: {ex.Message}"); }
+                }
+                Stdout.Write(new JsonObject { ["type"] = "fg", ["sid"] = sid, ["hwnd"] = hwnd, ["paneId"] = paneId, ["paneClass"] = paneClass, ["tabId"] = tabId });
                 break;
             }
             case "focusWindow":
@@ -504,7 +526,8 @@ sealed class IslandHost : IDisposable
                 var hv = json["hwnd"]?.GetValue<long>() ?? 0;
                 var paneId = json["paneId"]?.GetValue<string>() ?? "";
                 var paneClass = json["paneClass"]?.GetValue<string>() ?? "";
-                if (hv != 0) FocusWindow(hv, paneId, paneClass);
+                var tabId = json["tabId"]?.GetValue<string>() ?? "";
+                if (hv != 0) FocusWindow(hv, paneId, paneClass, tabId);
                 break;
             }
             default:
@@ -533,7 +556,7 @@ sealed class IslandHost : IDisposable
         Form.HitRects = list.ToArray();
     }
 
-    private void FocusWindow(long hwndVal, string paneId, string paneClass)
+    private void FocusWindow(long hwndVal, string paneId, string paneClass, string tabId)
     {
         var h = new IntPtr(hwndVal);
         if (!IsWindow(h)) { Log.Info($"focusWindow: stale hwnd {hwndVal}"); return; }
@@ -549,28 +572,63 @@ sealed class IslandHost : IDisposable
             SetForegroundWindow(h);
             AttachThreadInput(myTid, fgTid, false);
         }
-        if (!string.IsNullOrEmpty(paneId)) FocusPane(h, paneId, paneClass);
+        if (!string.IsNullOrEmpty(paneId)) FocusPane(h, paneId, paneClass, tabId);
     }
 
-    // 同窗多 pane(如 Windows Terminal 分屏):按捕获时的 UIA RuntimeId 把键盘焦点
-    // 还给那个 pane——终端没有独立输入框,pane 得焦后击键即直达 CC 输入行。
-    private void FocusPane(IntPtr hwnd, string paneId, string paneClass)
+    private static AutomationElement? FindByRuntimeId(AutomationElement root, int[] rid, Condition cond)
+    {
+        foreach (AutomationElement el in root.FindAll(TreeScope.Subtree, cond))
+        {
+            int[] r;
+            try { r = el.GetRuntimeId(); } catch { continue; }
+            if (Automation.Compare(r, rid)) return el;
+        }
+        return null;
+    }
+
+    // 同窗多 pane / 多 tab(如 Windows Terminal):按捕获时的 UIA RuntimeId 把键盘
+    // 焦点还给那个 pane——终端没有独立输入框,pane 得焦后击键即直达 CC 输入行。
+    // 非活动 tab 的 pane 不在 UIA 树里:先按 tabId 把所在 tab 切出来再找。
+    private void FocusPane(IntPtr hwnd, string paneId, string paneClass, string tabId)
     {
         try
         {
             int[] target = Array.ConvertAll(paneId.Split(','), int.Parse);
             var root = AutomationElement.FromHandle(hwnd);
-            Condition cond = string.IsNullOrEmpty(paneClass)
+            Condition paneCond = string.IsNullOrEmpty(paneClass)
                 ? Condition.TrueCondition
                 : new PropertyCondition(AutomationElement.ClassNameProperty, paneClass);
-            AutomationElement? match = null;
-            foreach (AutomationElement el in root.FindAll(TreeScope.Subtree, cond))
+            var match = FindByRuntimeId(root, target, paneCond);
+            if (match == null && !string.IsNullOrEmpty(tabId))
             {
-                int[] rid;
-                try { rid = el.GetRuntimeId(); } catch { continue; }
-                if (Automation.Compare(rid, target)) { match = el; break; }
+                var tab = FindByRuntimeId(root,
+                    Array.ConvertAll(tabId.Split(','), int.Parse),
+                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.TabItem));
+                if (tab == null)
+                {
+                    Log.Info("focusPane: tabItem runtimeId 未找到(tab 已关?)");
+                }
+                else
+                {
+                    try
+                    {
+                        if (tab.GetCurrentPattern(SelectionItemPattern.Pattern) is SelectionItemPattern sel
+                            && !sel.Current.IsSelected)
+                        {
+                            sel.Select();
+                            Thread.Sleep(350); // 等 tab 内容挂回可视树
+                        }
+                    }
+                    catch (Exception ex) { Log.Info($"focusPane tab select: {ex.Message}"); }
+                    match = FindByRuntimeId(root, target, paneCond);
+                }
             }
-            if (match == null) { Log.Info($"focusPane: runtimeId 未找到(pane 已关?) class={paneClass}"); return; }
+            if (match == null)
+            {
+                // tab 若已切回,WT 会自行恢复该 tab 上次聚焦的 pane,到此已是最佳努力
+                Log.Info($"focusPane: pane runtimeId 未找到(已尽力切 tab) class={paneClass}");
+                return;
+            }
             try { match.SetFocus(); } catch (Exception ex) { Log.Info($"focusPane SetFocus: {ex.Message}"); }
             Thread.Sleep(100);
             bool ok = false;

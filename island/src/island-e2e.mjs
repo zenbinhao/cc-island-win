@@ -208,7 +208,7 @@ Write-Output "$($r.L),$($r.T),$($r.R),$($r.B)"`).split(",").map(Number);
     const lg = readFileSync(join(homedir(), ".claude", "claude-island.log"), "utf8");
     capLine = ([...lg.matchAll(/fg captured: e2e-pane → .*$/gm)].pop() || [""])[0];
   } catch {}
-  const capM = capLine.match(/hwnd=(\d+) pane=([^#]*)#(.*)$/) || [];
+  const capM = capLine.match(/hwnd=(\d+) pane=([^#]*)#([^ ]+)/) || [];
   assert(Number(capM[1]) === wtHwnd && capM[3] && capM[3] !== "-",
     `捕获到 WT pane (class=${capM[2] || "?"} rid=${(capM[3] || "").slice(0, 24)}…)`);
   // 点右 pane → 焦点移走
@@ -231,6 +231,66 @@ Write-Output "$($r.L),$($r.T),$($r.R),$($r.B)"`).split(",").map(Number);
   ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`);
   } catch {}
   await sendMsg({ id: "e2e-pane", type: "remove" });
+  await sleep(800);
+
+  // ── 场景 3: WT 双 tab,跨 tab 跳转 ────────────────────────────────────
+  // 非活动 tab 的 pane 不挂在 UIA 树上——聚焦端须先按捕获的 TabItem
+  // RuntimeId 把 tab 切出来,再找 pane 落焦。
+  console.log("\n— 场景 3: WT 双 tab,跨 tab 跳转 —");
+  ps(String.raw`Start-Process wt -ArgumentList '-w -1 nt cmd /k "title tabA" ; nt cmd /k "title tabB"'`);
+  let wt2 = 0;
+  for (let i = 0; i < 30 && !wt2; i++) {
+    await sleep(400);
+    wt2 = Number(psW(`Write-Output ([W]::FindTitle("tabA","tabB"))`));
+  }
+  assert(wt2 > 0, `WT 双 tab 窗口启动 (hwnd=${wt2})`);
+  await sleep(800);
+  const [tl, tt, tr, tb] = psW(String.raw`
+$r = New-Object RECT; [void][W]::GetWindowRect([IntPtr]${wt2}, [ref]$r)
+Write-Output "$($r.L),$($r.T),$($r.R),$($r.B)"`).split(",").map(Number);
+  // 点一下内容区,确保前台+焦点在终端
+  psW(`[W]::Click(${Math.round((tl + tr) / 2)}, ${Math.round(tt + (tb - tt) * 0.6)})`);
+  await sleep(500);
+  // 切到 tabA(初始活动 tab 通常是后创建的 tabB)
+  let curTitle = psW(`Write-Output ([W]::Title([IntPtr]${wt2}))`);
+  if (!curTitle.endsWith("tabA")) {
+    ps(`(New-Object -ComObject WScript.Shell).SendKeys("^{TAB}")`);
+    await sleep(600);
+    curTitle = psW(`Write-Output ([W]::Title([IntPtr]${wt2}))`);
+  }
+  assert(curTitle.endsWith("tabA"), `tabA 已激活 [${curTitle}]`);
+  // captureFg:记下 pane + 所在 tab
+  await sendMsg({ id: "e2e-tab", type: "update", project: "e2e-tab", status: "done",
+                  detail: "", prompt: "tab-jump", startedAt: Date.now(), captureFg: true });
+  await sleep(1200);
+  let tabCap = "";
+  try {
+    const lg = readFileSync(join(homedir(), ".claude", "claude-island.log"), "utf8");
+    tabCap = ([...lg.matchAll(/fg captured: e2e-tab → .*$/gm)].pop() || [""])[0];
+  } catch {}
+  const tabM = tabCap.match(/pane=([^#]*)#([^ ]+) tab=#(.+)$/) || [];
+  assert(tabM[1] === "TermControl" && tabM[3] && tabM[3] !== "-",
+    `捕获到 pane+tab (tab rid=${(tabM[3] || "").slice(0, 20)}…)`);
+  // 切到 tabB → 目标 pane 脱离 UIA 树
+  ps(`(New-Object -ComObject WScript.Shell).SendKeys("^{TAB}")`);
+  await sleep(600);
+  assert(psW(`Write-Output ([W]::Title([IntPtr]${wt2}))`).endsWith("tabB"), "tabB 已激活(目标 pane 脱树)");
+  // 点击岛行 → 应自动切回 tabA 并落焦
+  const rect4 = islandRect();
+  assert(!!rect4 && rect4.h > 10, "岛窗口在岗");
+  psW(`[W]::Click(${Math.round((rect4.l + rect4.r) / 2 - 100 * f)}, ${Math.round(rect4.t + (ROW_H * f) / 2)})`);
+  await sleep(2200);
+  const fgTab = Number(psW(`Write-Output ([int64][W]::GetForegroundWindow())`));
+  const titleTab = psW(`Write-Output ([W]::Title([IntPtr]${wt2}))`);
+  assert(fgTab === wt2, `WT 窗口在前台 (${fgTab})`);
+  assert(titleTab.endsWith("tabA"), `自动切回 tabA 并落焦 —— 跨 tab 跳转生效 [title=${titleTab}]`);
+  // 清理
+  try {
+    ps(String.raw`Get-CimInstance Win32_Process -Filter "Name='cmd.exe'" |
+  Where-Object { $_.CommandLine -match 'title tab[AB]' } |
+  ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`);
+  } catch {}
+  await sendMsg({ id: "e2e-tab", type: "remove" });
 
   console.log(`\n=== 结果: ${passed} 通过, ${failed} 失败 ===`);
   process.exit(failed > 0 ? 1 : 0);

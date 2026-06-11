@@ -6,6 +6,11 @@
 ## [Unreleased]
 
 ### Added
+- **跳转再升级:跨 tab 定位 + 捕获表持久化**(用户实测反馈:同窗多个 WSL2 子窗口,目标在非活动 tab 时不切换):
+  - 根因(日志实证):捕获完全正确(`pane=TermControl#…`),但 **WT 非活动 tab 的 pane 不挂在 UIA 树上**,点击时 `FindAll` 找不到该 RuntimeId → 退窗口级 → 窗口本就在前台,看起来"没反应"。
+  - 修复:`captureFg` 同时记录**所在 TabItem 的 RuntimeId**(tab 头常驻 UIA 树);`focusWindow` 找不到 pane 时,按 TabItem RuntimeId `SelectionItemPattern.Select()` 切 tab、等内容挂回树(350ms)再找 pane 落焦;tab 也找不到才止于窗口级。
+  - 第二个实测漏洞:捕获表原是 companion 内存态,reload 即丢,点击悄无声息没动作。现持久化到 `~/.claude/claude-island-fg.json`(启动加载、捕获/摘行即写)。
+  - E2E 场景 3(全自动):`wt -w -1` 开双 tab(cmd 各自 title tabA/B)→ Ctrl+Tab 切到 tabA 捕获(断言 tab RuntimeId 非空)→ 切回 tabB(目标 pane 脱树)→ SendInput 点击岛行 → 断言标题自动变回 tabA。三场景 21 断言全绿,套件 46。
 - **跳转升级为 pane 级精确聚焦**（窗口级跳转的后继增强,用户点名:多 pane 下「拉起窗口」不够,要直接落焦到那个 CC 的输入行）:
   - 捕获端:`captureFg` 除前台 HWND 外,同时取 **UIA 焦点元素的 RuntimeId + ClassName**。坑:`AutomationElement.FocusedElement` 在 WT 上停在 HWND 级壳 `Windows.UI.Input.InputSite.WindowClass`(每窗口一个,不到 pane)——需 `FindFirst(Descendants, HasKeyboardFocus=true)` 向下钻到真正的 `TermControl`。
   - 聚焦端:`focusWindow` 带 `paneId/paneClass`,拉起窗口后在其 UIA 子树内按 ClassName 缩小范围、`Automation.Compare` 比对 RuntimeId 找回该 pane → `SetFocus()`;100ms 后校验焦点未落则对元素矩形中心 `SendInput` 真实点击兜底(虚拟桌面绝对坐标,多屏正确)。pane 已关/找不到 → 静默退回窗口级。

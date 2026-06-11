@@ -277,6 +277,7 @@ async function main() {
   });
   assert(fg15 && fg15.sid === "t15" && typeof fg15.hwnd === "number", "captureFg 应答含 sid+hwnd");
   assert(fg15 && typeof fg15.paneId === "string" && typeof fg15.paneClass === "string", "captureFg 应答含 paneId+paneClass(UIA)");
+  assert(fg15 && typeof fg15.tabId === "string", "captureFg 应答含 tabId(跨 tab 跳转)");
   w15.close();
   await sleep(300);
 

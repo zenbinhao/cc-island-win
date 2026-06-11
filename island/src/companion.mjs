@@ -124,16 +124,30 @@ function initWindow(w) {
   for (const js of currentRows.values()) { try { w.send(js); } catch {} }
 }
 
-// 跳转聚焦:sessionId → { hwnd, paneId, paneClass }(UserPromptSubmit 时刻由 host 捕获;
-// paneId 是 UIA RuntimeId,定位同窗多 pane 里的那个 TermControl)
+// 跳转聚焦:sessionId → { hwnd, paneId, paneClass, tabId }(UserPromptSubmit 时刻由
+// host 捕获;paneId/tabId 是 UIA RuntimeId——pane 定位 TermControl,tab 用于非活动
+// tab 时先切过去)。持久化到磁盘,companion 重启后点击跳转依然可用。
+const FG_FILE = join(PREF_DIR, "claude-island-fg.json");
 const hwndBySession = new Map();
+try {
+  const saved = JSON.parse(readFileSync(FG_FILE, "utf8"));
+  if (saved && typeof saved === "object") {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v && typeof v.hwnd === "number") hwndBySession.set(k, v);
+    }
+    log("info", `fg table loaded: ${hwndBySession.size} entries`);
+  }
+} catch {}
+function saveFgTable() {
+  try { writeFileSync(FG_FILE, JSON.stringify(Object.fromEntries(hwndBySession))); } catch {}
+}
 function hostWin() { for (const w of wins) if (w._ready) return w; return null; }
 function focusSession(id) {
   const t = hwndBySession.get(id);
-  log("info", `focus id=${id} hwnd=${t ? t.hwnd : "none"} pane=${t ? (t.paneClass || "-") + "#" + (t.paneId || "-") : "-"}`);
+  log("info", `focus id=${id} hwnd=${t ? t.hwnd : "none"} pane=${t ? (t.paneClass || "-") + "#" + (t.paneId || "-") : "-"} tab=#${t ? (t.tabId || "-") : "-"}`);
   if (!t) return;
   const hw = hostWin();
-  if (hw) hw.cmd({ type: "focusWindow", hwnd: t.hwnd, paneId: t.paneId, paneClass: t.paneClass });
+  if (hw) hw.cmd({ type: "focusWindow", hwnd: t.hwnd, paneId: t.paneId, paneClass: t.paneClass, tabId: t.tabId || "" });
 }
 
 function openIslandWindow(screenPref) {
@@ -173,8 +187,10 @@ function openIslandWindow(screenPref) {
         hwnd: m.hwnd,
         paneId: typeof m.paneId === "string" ? m.paneId : "",
         paneClass: typeof m.paneClass === "string" ? m.paneClass : "",
+        tabId: typeof m.tabId === "string" ? m.tabId : "",
       });
-      log("info", `fg captured: ${m.sid} → hwnd=${m.hwnd} pane=${(m.paneClass || "-")}#${(m.paneId || "-")}`);
+      saveFgTable();
+      log("info", `fg captured: ${m.sid} → hwnd=${m.hwnd} pane=${(m.paneClass || "-")}#${(m.paneId || "-")} tab=#${(m.tabId || "-")}`);
     }
   });
   w.on("closed", () => {
@@ -220,7 +236,7 @@ function syncHeight() {
 function removeRowById(id) {
   activeRowIds.delete(id);
   rowPids.delete(id);
-  hwndBySession.delete(id);
+  if (hwndBySession.delete(id)) saveFgTable();
   currentRows.delete(id);
   syncHeight();  // 空了会自动隐藏(在 syncHeight 里统一处理)
   send('window.island.removeRow(' + JSON.stringify(id) + ')');

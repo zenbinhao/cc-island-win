@@ -79,7 +79,7 @@ companion.mjs  (常驻守护进程)
 ## 行为
 
 - **自动启动**: Claude Code 启动时灵动岛自动出现
-- **点击跳转（精确到 pane）**: 点击某行（× 以外的任意位置）即把该会话所在的终端窗口拉到前台（已最小化也会还原），并把**键盘焦点精确还给该会话所在的 pane**（Windows Terminal 分屏同窗多 pane 可区分）——落焦后直接打字就进那个 Claude Code 的输入行。原理：每次提交 prompt 时由常驻原生窗口捕获当时的前台窗口句柄 + UIA 焦点元素 RuntimeId（即那个 TermControl），零额外进程；pane 重排/缩放不影响定位。pane 已关闭或定位失败时退回窗口级；该会话尚未提交过 prompt 时点击无效果
+- **点击跳转（精确到 pane，跨 tab）**: 点击某行（× 以外的任意位置）即把该会话所在的终端窗口拉到前台（已最小化也会还原），并把**键盘焦点精确还给该会话所在的 pane**——落焦后直接打字就进那个 Claude Code 的输入行。该会话在 Windows Terminal 的**非活动 tab** 里也行：会先自动切到那个 tab 再落焦。原理：每次提交 prompt 时由常驻原生窗口捕获当时的前台窗口句柄 + UIA 焦点元素（TermControl）与所在 TabItem 的 RuntimeId，零额外进程；pane 重排/缩放不影响定位，捕获表持久化（重启 companion 不丢）。pane/tab 已关闭或定位失败时逐级退化到窗口级；该会话尚未提交过 prompt 时点击无效果
 - **关闭 CC 自动摘行**: Ctrl+C/Ctrl+D/exit → SessionEnd hook 秒级摘行；直接叉掉终端窗口 → 父进程探活（30s 轮询）兜底
 - **空了整窗隐藏**: 最后一行移除后窗口隐藏（高度 0），companion 守护进程继续存活；下次任意 update 自动复现
 - **状态保留**: done / interrupted / waiting 等状态行保留到该会话下一个事件覆盖（不再定时自动移除）

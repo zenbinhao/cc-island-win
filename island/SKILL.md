@@ -30,7 +30,7 @@ companion.mjs  (常驻守护进程，永不自动退出)
   └─ 渲染透明背景黑色胶囊 HTML
 ```
 
-点击跳转链路：`UserPromptSubmit` 时 bridge 在 update 上标记 `captureFg` → companion 让常驻原生窗口捕获当时的前台窗口 HWND **与 UIA 焦点元素 RuntimeId**（用户刚按回车，焦点正落在该 pane 的 TermControl 上；HWND 级壳如 WT 的 `Windows.UI.Input.InputSite.WindowClass` 会向下钻到真正持键盘焦点的叶子）→ 点击胶囊行 → 原生窗口 `SetForegroundWindow` 拉起对应终端（已最小化先还原），再按 RuntimeId 找回该 pane 元素 `SetFocus()`（不生效则对其矩形中心补一次真实点击兜底）。零额外进程、不探测终端类型；**粒度到 pane**——WT 分屏同窗多 pane 可精确区分，落焦后击键直达该 CC 输入行；pane 已关/找不到时退回窗口级。
+点击跳转链路：`UserPromptSubmit` 时 bridge 在 update 上标记 `captureFg` → companion 让常驻原生窗口捕获当时的前台窗口 HWND、**UIA 焦点元素 RuntimeId**（用户刚按回车，焦点正落在该 pane 的 TermControl 上；HWND 级壳如 WT 的 `Windows.UI.Input.InputSite.WindowClass` 会向下钻到真正持键盘焦点的叶子）**及所在 TabItem 的 RuntimeId** → 捕获表持久化到 `~/.claude/claude-island-fg.json`（companion 重启不丢）→ 点击胶囊行 → 原生窗口 `SetForegroundWindow` 拉起对应终端（已最小化先还原），按 RuntimeId 找回该 pane 元素 `SetFocus()`；**pane 不在 UIA 树（在非活动 tab）时先按 TabItem RuntimeId `Select()` 切 tab 再找**；SetFocus 不生效则对其矩形中心补一次真实点击兜底。零额外进程、不探测终端类型；**粒度到 pane、可跨 tab**，落焦后击键直达该 CC 输入行；逐级退化：pane 找不到 → 切 tab 重找 → 仍无则窗口级。
 
 ## 目录结构
 
@@ -284,7 +284,7 @@ node ~/.claude/skills/island/src/bridge.mjs status
 
 ### 点击行跳转无反应 / 焦点没回到正确的 pane
 
-跳转依赖该会话**提交过 prompt**（UserPromptSubmit 时刻捕获前台窗口句柄 + UIA pane RuntimeId）。若会话从未提交过 prompt、或对应终端窗口已关闭，点击行不会有动作（静默忽略）。pane 级定位失败（如 pane 已关、目标应用 UIA 树不可达）会退回窗口级；查 `~/.claude/claude-island.log` 中 `fg captured`（捕获到的 class 应为 `TermControl`）与 `focusPane` 行可定位环节。注意：目标终端与灵动岛进程的权限级别需一致（都提权或都不提权），跨完整性级别 UIA 会被系统拦截。
+跳转依赖该会话**提交过 prompt**（UserPromptSubmit 时刻捕获前台窗口句柄 + UIA pane/tab RuntimeId，持久化于 `~/.claude/claude-island-fg.json`）。若会话从未提交过 prompt、或对应终端窗口已关闭，点击行不会有动作（静默忽略）。pane 在非活动 tab 时会先自动切 tab 再落焦；定位失败逐级退化到窗口级。查 `~/.claude/claude-island.log` 中 `fg captured`（捕获到的 class 应为 `TermControl`、tab 字段非空）与 `focusPane` 行可定位环节。注意：目标终端与灵动岛进程的权限级别需一致（都提权或都不提权），跨完整性级别 UIA 会被系统拦截。
 
 ### companion 进程残留
 
@@ -298,7 +298,7 @@ node ~/.claude/skills/island/src/bridge.mjs status
 - **关闭 CC 自动摘行**: Ctrl+C/Ctrl+D/exit → SessionEnd hook 秒级摘行；直接叉掉终端窗口 → 父进程探活（30s 轮询，process.kill 判活）兜底。**仅 WSL2 验证**，native Windows 未测试。
 - **空了整窗隐藏**: 最后一行移除后窗口隐藏（resize 0 高），companion 守护进程继续存活；下次任意 update 自动复现。
 - **自动出现**: 发送消息后，状态行立即显示（UserPromptSubmit hook）。
-- **点击跳转（pane 级）**: 点击某行（× 以外任意位置）把该会话所在终端窗口拉到前台（已最小化先还原），并把键盘焦点精确还给该会话所在的 pane（UIA RuntimeId 定位 TermControl，pane 重排/缩放不失效）——落焦后击键直达该 CC 输入行；hover 时行高亮并淡入 ↗ 提示。pane 已关/定位失败退回窗口级；会话尚无 UserPromptSubmit 捕获时点击无效果。
+- **点击跳转（pane 级，跨 tab）**: 点击某行（× 以外任意位置）把该会话所在终端窗口拉到前台（已最小化先还原），并把键盘焦点精确还给该会话所在的 pane（UIA RuntimeId 定位 TermControl，pane 重排/缩放不失效）；目标在非活动 tab 时自动先切 tab——落焦后击键直达该 CC 输入行；hover 时行高亮并淡入 ↗ 提示。捕获表持久化（companion 重启不丢）。逐级退化：pane → 切 tab 重找 → 窗口级；会话尚无 UserPromptSubmit 捕获时点击无效果。
 - **状态保留**: done（完成）、interrupted（中断）、waiting（等待确认）等状态行不再定时自动移除——会一直保留到该会话的下一个事件把它覆盖（例如完成后再次发消息翻回「思考中」）。多 pane 下灵动岛即一块持续的会话状态看板。waiting/done 行有 inset 呼吸光强调，状态切换时一次性 pop。
 - **逐行消除**: 光标悬停某行浮现右缘 × 按钮（右侧元信息左移让位），点击即从所有屏幕移除该会话行；行只被「下一个事件覆盖」或「× 手动消除」移除，无定时自动消失。整窗关闭仍用 `/island kill`。
 - **收起/展开**: 点击底部中间的手柄（chevron 朝上=收起 / 朝下=展开）可手动收起灵动岛。收起后窗口仅剩手柄高度；有新状态更新时自动展开。状态为内存态，不持久化。
