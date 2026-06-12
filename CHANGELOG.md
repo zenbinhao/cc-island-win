@@ -5,6 +5,17 @@
 
 ## [Unreleased]
 
+### Fixed
+- **IPC 命名管道 → TCP 回环 127.0.0.1:38917**(用户实测反馈:cmd 里开的 Claude Code 灵动岛永远不显示):
+  - 根因(逐层实证):本机 WT 为管理员运行 → WSL hook 拉起的 companion 提权 → 其命名管道携带创建者完整性级别,**非提权进程连接被拒**——`schtasks /RL LIMITED` 跑 medium-IL 探针连 `\\.\pipe\claude-island` 得 `EPERM`,提权上下文 `CONNECT-OK`。于是 cmd(非提权)会话的每个 hook 都连不上 → update 全丢、永不上岛;bridge 失连还会 spawn 注定 EADDRINUSE 的 companion(日志实锤:90 秒内 8 个 `companion starting → EADDRINUSE` 风暴)。
+  - 修复:`socket-path.mjs` 默认端点改 `{port:38917, host:"127.0.0.1"}`(显式绑回环,不暴露局域网;端口避开本机 Hyper-V 排除段),`net.connect`/`server.listen` 通吃,EADDRINUSE 单例语义不变。`CLAUDE_ISLAND_SOCK` 覆盖升级:纯数字=TCP 端口,其它=管道/套接字路径。
+  - 修复后 medium-IL 探针 `CONNECT-OK`,日志里非提权会话的 update 开始到达。换代自愈:新 companion 拿到 TCP 单例后清掉旧管道 companion 的 host,旧实例随之退出,无需手工迁移。
+- **companion 启动顺序:先 listen 拿单例,再清孤儿/写 PID/开窗**:此前启动最前就 `taskkill /F /IM island-host-win.exe` 并抢写 PID 文件,EADDRINUSE 的并发实例会**误杀健康 companion 的 host 窗口**(同权场景)、把 PID 文件指向将死进程,还会开一个一闪而过的 host 再退出。现在 EADDRINUSE 落败者全程零副作用;附带收益:companion 从 spawn 到可连通从 ~1-2s 降到 ~100ms(listen 不再等 WebView2 开窗)。窗口未就绪期间到达的 captureFg 排队,首窗 ready 后立即补发(冷启动首条 prompt 的跳转绑定不再丢失)。
+- **状态文件并发写损坏 + 永不自愈**(现场实锤:`claude-island-state.json` 尾部残留 `}ozenElapsed": 357587…` 垃圾,JSON 解析永久失败,所有会话 prompt/计时丢失,日志全是 `prompt=""`):多个一次性 bridge 并发 `writeFileSync` 互相截断;且 `saveSessionData` 解析失败即静默放弃,损坏永不修复。修复:统一 `writeStateFileAtomic`(写 `.tmp` + rename,NTFS 原子替换),解析失败以空表自愈重建。代价说明:并发读改写仍可能丢一次更新(最后写者赢),但文件恒为合法 JSON。
+- **探活误删 cmd 宿主的活跃会话行**:cmd 宿主的 CC 经一次性 `cmd /c` 包装进程调 hook,bridge 记的 `ppid` 在 hook 结束后立刻死亡 → 30s 探活就把**活跃会话**的行摘掉(修复 IPC 后日志实锤:`liveness check: row … pid=3452 is dead, removing`)。`deadRowIds` 规则升级:pid 存活记入 `seenAlive`;曾存活的 pid 死亡 → 终端真关了,立即摘行(WSL 行为不变);**从未观测存活的 pid 不可信** → 按 5 分钟无更新静默期兜底。
+- **`/island off` 形同虚设**:`handleHook` 从不检查 `enabled`,off 之后 hook 照常发 update、还会把 companion 拉活。现在 `enabled=false` 时 hook 全部静默(SKILL.md 既有语义)。
+- **跳转防错乱:窗口类名校验**(用户实测反馈:点击行偶尔跳到无关窗口):捕获表持久化的 hwnd 会被系统复用给别的窗口,`IsWindow` 仍为真就照跳。现 `captureFg` 同时记窗口类名(`GetClassName`),`focusWindow` 跳转前校验,不符即放弃并记日志(旧表无类名字段的条目跳过校验,向后兼容)。另一错乱来源——回车后切窗的捕获竞态——被 IPC 修复大幅收窄(失连重试曾把捕获拖到 4-6 秒后,现 ~100-300ms),残余竞态在 SKILL.md 明示。
+
 ### Added
 - **跳转再升级:跨 tab 定位 + 捕获表持久化**(用户实测反馈:同窗多个 WSL2 子窗口,目标在非活动 tab 时不切换):
   - 根因(日志实证):捕获完全正确(`pane=TermControl#…`),但 **WT 非活动 tab 的 pane 不挂在 UIA 树上**,点击时 `FindAll` 找不到该 RuntimeId → 退窗口级 → 窗口本就在前台,看起来"没反应"。
@@ -31,6 +42,9 @@
 - **`SOCK` 支持 `CLAUDE_ISLAND_SOCK` env 覆盖**(测试 seam)+ island-test fake companion 基建,新增测试 12–15(windowSize / env 覆盖 / captureFg 标志 / host 原生协议)。
 
 ### Changed
+- **测试套件与真实灵动岛隔离**:island-test 起套件级假 companion(127.0.0.1 临时端口),所有 bridge 默认指向它——此前测试行会真实出现在用户屏幕上、且 bridge 失连时 spawn 的 companion 会重启用户的 host。fake companion 基建从命名管道换成 TCP 临时端口(直接演练生产同款代码路径)。
+- 新增测试:8.5 状态文件损坏自愈、13.5 并发 12 路 update 不丢 + 并发后文件仍合法 JSON、14.5 enabled=false 静默、探活新规则 4 例、captureFg 应答含 winClass。套件 46 → 56 断言。
+- 同步文档:README / SKILL.md / CLAUDE.md 架构图与排查指南(TCP 端点、混合提权说明、探活规则、hwnd 复用防护、捕获竞态残余)。
 - **`island.html.mjs` 全重写**(动效/交互全权重设计):
   - 结构:外层 `.row-wrap` 只管 transform 定位(GPU 友好),内层 `.row` 只管观感;行 DOM 只建一次,文本经 refs `textContent` 增量更新,不再整行 innerHTML 重建(无 esc/innerHTML 注入面)。
   - 动效:进场 滑入+轻弹簧、退场 上移收缩淡出、下方行平滑上滑补位(淘汰 max-height 跳变);状态切到 waiting/done 一次性 pop + 持续 inset 呼吸光;点击按压反馈;收起手柄重绘为 chevron 细柄。

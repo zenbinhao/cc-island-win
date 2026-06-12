@@ -23,7 +23,7 @@ description: >
 Claude Code hooks (settings.json)
   ↓ SessionStart / UserPromptSubmit / PreToolUse / PostToolUse / Stop / StopFailure / PermissionRequest / SessionEnd
 bridge.mjs  (一次性进程，每次 hook 调用，数据来自 stdin JSON)
-  ↓ Named pipe
+  ↓ TCP 回环 127.0.0.1:38917（CLAUDE_ISLAND_SOCK 可覆盖；不用命名管道——管道会携带创建者的完整性级别，提权终端拉起的 companion 会拒绝非提权 CC 连接）
 companion.mjs  (常驻守护进程，永不自动退出)
   ↓ stdin/stdout JSON-line 协议
 原生窗口 (C# WebView2)
@@ -67,7 +67,7 @@ companion.mjs  (常驻守护进程，永不自动退出)
 
 ### Claude Code 运行在 WSL2 时
 
-灵动岛 UI 只在 Windows 桌面渲染，但 Claude Code 的宿主可以是 WSL2。此时 **hook 命令必须用 Windows 的 node（`node.exe`），不能用 WSL 的 Linux node**——后者连不上 Windows 命名管道、`platform.mjs` 也只认 `win32`。
+灵动岛 UI 只在 Windows 桌面渲染，但 Claude Code 的宿主可以是 WSL2。此时 **hook 命令必须用 Windows 的 node（`node.exe`），不能用 WSL 的 Linux node**——Linux node 的 `127.0.0.1` 是 WSL 自己的回环，到不了 Windows 侧的 companion，且 companion / 原生 exe 的 spawn 与进程管理也必须发生在 Windows 侧。
 
 配置 hooks 时（WSL 的 `~/.claude/settings.json`，如 `/root/.claude/settings.json`），把命令里的 `node` 换成 `node.exe`，bridge 路径用 Windows 形式 `C:/…`：
 
@@ -268,7 +268,8 @@ node ~/.claude/skills/island/src/bridge.mjs status
 2. 检查状态并告知用户当前 enabled/scale/运行状态
 3. 若 enabled=false → 执行 `/island on`
 4. 若 companion 未运行 → 执行 `bridge.mjs reload`
-5. 若持续异常 → 检查 .NET Runtime 和 WebView2 Runtime
+5. 混合提权场景（如管理员 WT + 普通 cmd 同时跑 CC）：确认 companion 是 TCP 版（日志应有 `listening on {"port":38917`）。旧版命名管道会拒绝非提权会话连接（EPERM），表现为该会话永远不上岛 + 日志里反复 `companion starting … EADDRINUSE`；执行 `/island reload` 换代即可
+6. 若持续异常 → 检查 .NET Runtime 和 WebView2 Runtime
 
 ### 状态卡住 / 不更新
 
@@ -284,7 +285,7 @@ node ~/.claude/skills/island/src/bridge.mjs status
 
 ### 点击行跳转无反应 / 焦点没回到正确的 pane
 
-跳转依赖该会话**提交过 prompt**（UserPromptSubmit 时刻捕获前台窗口句柄 + UIA pane/tab RuntimeId，持久化于 `~/.claude/claude-island-fg.json`）。若会话从未提交过 prompt、或对应终端窗口已关闭，点击行不会有动作（静默忽略）。pane 在非活动 tab 时会先自动切 tab 再落焦；定位失败逐级退化到窗口级。查 `~/.claude/claude-island.log` 中 `fg captured`（捕获到的 class 应为 `TermControl`、tab 字段非空）与 `focusPane` 行可定位环节。注意：目标终端与灵动岛进程的权限级别需一致（都提权或都不提权），跨完整性级别 UIA 会被系统拦截。
+跳转依赖该会话**提交过 prompt**（UserPromptSubmit 时刻捕获前台窗口句柄 + 窗口类名 + UIA pane/tab RuntimeId，持久化于 `~/.claude/claude-island-fg.json`）。若会话从未提交过 prompt、或对应终端窗口已关闭，点击行不会有动作（静默忽略）。窗口句柄被系统复用给别的窗口时，类名校验不符会放弃跳转（日志 `focusWindow: hwnd … 已被复用`），避免跳到无关窗口——重新提交一次 prompt 即重新绑定。pane 在非活动 tab 时会先自动切 tab 再落焦；定位失败逐级退化到窗口级。查 `~/.claude/claude-island.log` 中 `fg captured`（捕获到的 class 应为 `TermControl`、tab 字段非空）与 `focusPane` 行可定位环节。注意：状态显示不受提权差异影响（TCP 回环），但 **pane 级落焦**要求目标终端与灵动岛进程权限级别一致（都提权或都不提权），跨完整性级别 UIA 会被系统拦截，此时退化到窗口级。另外捕获发生在回车后约百毫秒内——若提交后立刻切到别的窗口，可能绑到切去的窗口，下次提交会自动纠正。
 
 ### companion 进程残留
 
@@ -295,7 +296,7 @@ node ~/.claude/skills/island/src/bridge.mjs status
 ## 行为说明
 
 - **自动启动**: Claude Code 启动时（SessionStart hook），灵动岛自动出现。
-- **关闭 CC 自动摘行**: Ctrl+C/Ctrl+D/exit → SessionEnd hook 秒级摘行；直接叉掉终端窗口 → 父进程探活（30s 轮询，process.kill 判活）兜底。**仅 WSL2 验证**，native Windows 未测试。
+- **关闭 CC 自动摘行**: Ctrl+C/Ctrl+D/exit → SessionEnd hook 秒级摘行；直接叉掉终端窗口 → 父进程探活（30s 轮询，process.kill 判活）兜底。hook 由一次性包装进程（如 cmd 宿主的 `cmd /c`）拉起时其 pid 不可信，改按 5 分钟无更新静默期兜底，活跃会话不会被误删。WSL2 与 native Windows 宿主均适用。
 - **空了整窗隐藏**: 最后一行移除后窗口隐藏（resize 0 高），companion 守护进程继续存活；下次任意 update 自动复现。
 - **自动出现**: 发送消息后，状态行立即显示（UserPromptSubmit hook）。
 - **点击跳转（pane 级，跨 tab）**: 点击某行（× 以外任意位置）把该会话所在终端窗口拉到前台（已最小化先还原），并把键盘焦点精确还给该会话所在的 pane（UIA RuntimeId 定位 TermControl，pane 重排/缩放不失效）；目标在非活动 tab 时自动先切 tab——落焦后击键直达该 CC 输入行；hover 时行高亮并淡入 ↗ 提示。捕获表持久化（companion 重启不丢）。逐级退化：pane → 切 tab 重找 → 窗口级；会话尚无 UserPromptSubmit 捕获时点击无效果。

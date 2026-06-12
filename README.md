@@ -69,7 +69,7 @@ Agent 会自动完成环境检查、依赖安装、编译和 hooks 配置。
 Claude Code hooks (settings.json)
   ↓ SessionStart / UserPromptSubmit / PreToolUse / PostToolUse / Stop / StopFailure / PermissionRequest / SessionEnd
 bridge.mjs  (一次性进程，每次 hook 调用)
-  ↓ Named pipe
+  ↓ TCP 回环 127.0.0.1:38917
 companion.mjs  (常驻守护进程)
   ↓ stdin/stdout JSON-line 协议
 原生窗口 (C# WebView2)
@@ -80,7 +80,7 @@ companion.mjs  (常驻守护进程)
 
 - **自动启动**: Claude Code 启动时灵动岛自动出现
 - **点击跳转（精确到 pane，跨 tab）**: 点击某行（× 以外的任意位置）即把该会话所在的终端窗口拉到前台（已最小化也会还原），并把**键盘焦点精确还给该会话所在的 pane**——落焦后直接打字就进那个 Claude Code 的输入行。该会话在 Windows Terminal 的**非活动 tab** 里也行：会先自动切到那个 tab 再落焦。原理：每次提交 prompt 时由常驻原生窗口捕获当时的前台窗口句柄 + UIA 焦点元素（TermControl）与所在 TabItem 的 RuntimeId，零额外进程；pane 重排/缩放不影响定位，捕获表持久化（重启 companion 不丢）。pane/tab 已关闭或定位失败时逐级退化到窗口级；该会话尚未提交过 prompt 时点击无效果
-- **关闭 CC 自动摘行**: Ctrl+C/Ctrl+D/exit → SessionEnd hook 秒级摘行；直接叉掉终端窗口 → 父进程探活（30s 轮询）兜底
+- **关闭 CC 自动摘行**: Ctrl+C/Ctrl+D/exit → SessionEnd hook 秒级摘行；直接叉掉终端窗口 → 父进程探活（30s 轮询；hook 经一次性包装进程拉起时 pid 不可信，改按 5 分钟静默期）兜底
 - **空了整窗隐藏**: 最后一行移除后窗口隐藏（高度 0），companion 守护进程继续存活；下次任意 update 自动复现
 - **状态保留**: done / interrupted / waiting 等状态行保留到该会话下一个事件覆盖（不再定时自动移除）
 - **逐行消除**: 光标悬停某行会浮现右缘 × 按钮（同时左移让位、淡入 ↗ 跳转提示），点 × 即从所有屏幕移除该会话行；行只被「下一个事件覆盖」或「× 手动消除」移除，无定时自动消失
