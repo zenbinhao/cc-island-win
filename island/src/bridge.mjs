@@ -12,7 +12,7 @@
 
 import { connect } from "node:net";
 import { spawn, execSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, renameSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -54,13 +54,26 @@ function readState() {
   } catch (e) { log(`readState failed: ${e.message}`); return fallback; }
 }
 
+// 原子写状态文件:先写临时文件再 rename。多个一次性 bridge 并发写时
+// 互相覆盖也只会丢一次更新,不会留下半截 JSON(尾部垃圾曾导致解析永久失败)
+function writeStateFileAtomic(data) {
+  const tmp = STATE_FILE + "." + process.pid + ".tmp";
+  try {
+    writeFileSync(tmp, JSON.stringify(data, null, 2));
+    renameSync(tmp, STATE_FILE);
+  } catch (e) {
+    try { unlinkSync(tmp); } catch {}
+    throw e;
+  }
+}
+
 function writeState(s) {
   try {
     if (!existsSync(PREF_DIR)) mkdirSync(PREF_DIR, { recursive: true });
     let prev = {};
     try { prev = JSON.parse(readFileSync(STATE_FILE, "utf8")); } catch {}
     if (prev && prev._activeSessionId) s._activeSessionId = prev._activeSessionId;
-    writeFileSync(STATE_FILE, JSON.stringify(s, null, 2));
+    writeStateFileAtomic(s);
   } catch (e) { log(`writeState failed: ${e.message}`); }
 }
 
@@ -214,9 +227,12 @@ function getSessionData(sessionId) {
 
 function saveSessionData(sessionId, fields) {
   try {
-    const data = existsSync(STATE_FILE)
-      ? JSON.parse(readFileSync(STATE_FILE, "utf8")) : {};
-    if (!data || typeof data !== "object") return;
+    // 文件损坏(并发写事故)→ 以空表自愈重建,而不是静默放弃
+    let data = {};
+    try {
+      if (existsSync(STATE_FILE)) data = JSON.parse(readFileSync(STATE_FILE, "utf8"));
+    } catch {}
+    if (!data || typeof data !== "object") data = {};
     if (!data._sessionData) data._sessionData = {};
     if (!data._sessionData[sessionId]) data._sessionData[sessionId] = {};
     Object.assign(data._sessionData[sessionId], fields);
@@ -227,7 +243,7 @@ function saveSessionData(sessionId, fields) {
         delete data._sessionData[id];
       }
     }
-    writeFileSync(STATE_FILE, JSON.stringify(data, null, 2));
+    writeStateFileAtomic(data);
   } catch {}
 }
 
@@ -237,7 +253,7 @@ function deleteSessionData(sessionId) {
       const data = JSON.parse(readFileSync(STATE_FILE, "utf8"));
       if (data && data._sessionData && data._sessionData[sessionId]) {
         delete data._sessionData[sessionId];
-        writeFileSync(STATE_FILE, JSON.stringify(data, null, 2));
+        writeStateFileAtomic(data);
       }
     }
   } catch {}
@@ -249,6 +265,7 @@ async function handleHook(json) {
   const sessionId = json.session_id || "unknown";
   const cwd = json.cwd || process.cwd();
   const state = readState(); // global prefs only (enabled, scale, etc.)
+  if (state.enabled === false) return; // /island off:hook 全部静默(否则 off 形同虚设,还会拉活 companion)
   const sess = getSessionData(sessionId);
 
   log(`hook event=${event} session=${sessionId} cwd=${cwd}`);

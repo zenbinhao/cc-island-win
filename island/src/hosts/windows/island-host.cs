@@ -200,6 +200,14 @@ sealed class IslandHost : IDisposable
     [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
     [DllImport("user32.dll")] static extern bool AttachThreadInput(uint a, uint b, bool attach);
     [DllImport("user32.dll")] static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr h, StringBuilder sb, int max);
+
+    // hwnd 会被系统复用:捕获时记下窗口类名,跳转前校验,不符即视为陈旧绑定
+    static string WndClass(IntPtr h)
+    {
+        var sb = new StringBuilder(256);
+        return GetClassName(h, sb, 256) > 0 ? sb.ToString() : "";
+    }
 
     // pane 聚焦兜底:SetFocus 不生效时对 pane 中心送一次真实点击(真实输入必得焦点)
     [StructLayout(LayoutKind.Sequential)] struct SI_MOUSEINPUT { public int dx, dy; public uint mouseData, dwFlags, time; public IntPtr dwExtraInfo; }
@@ -518,7 +526,7 @@ sealed class IslandHost : IDisposable
                     }
                     catch (Exception ex) { Log.Info($"captureFg tab: {ex.Message}"); }
                 }
-                Stdout.Write(new JsonObject { ["type"] = "fg", ["sid"] = sid, ["hwnd"] = hwnd, ["paneId"] = paneId, ["paneClass"] = paneClass, ["tabId"] = tabId });
+                Stdout.Write(new JsonObject { ["type"] = "fg", ["sid"] = sid, ["hwnd"] = hwnd, ["paneId"] = paneId, ["paneClass"] = paneClass, ["tabId"] = tabId, ["winClass"] = hwnd != 0 ? WndClass(new IntPtr(hwnd)) : "" });
                 break;
             }
             case "focusWindow":
@@ -527,7 +535,8 @@ sealed class IslandHost : IDisposable
                 var paneId = json["paneId"]?.GetValue<string>() ?? "";
                 var paneClass = json["paneClass"]?.GetValue<string>() ?? "";
                 var tabId = json["tabId"]?.GetValue<string>() ?? "";
-                if (hv != 0) FocusWindow(hv, paneId, paneClass, tabId);
+                var winClass = json["winClass"]?.GetValue<string>() ?? "";
+                if (hv != 0) FocusWindow(hv, paneId, paneClass, tabId, winClass);
                 break;
             }
             default:
@@ -556,10 +565,16 @@ sealed class IslandHost : IDisposable
         Form.HitRects = list.ToArray();
     }
 
-    private void FocusWindow(long hwndVal, string paneId, string paneClass, string tabId)
+    private void FocusWindow(long hwndVal, string paneId, string paneClass, string tabId, string winClass)
     {
         var h = new IntPtr(hwndVal);
         if (!IsWindow(h)) { Log.Info($"focusWindow: stale hwnd {hwndVal}"); return; }
+        // hwnd 复用防护:类名与捕获时不符,说明这个句柄已属于别的窗口,跳过去只会错乱
+        if (!string.IsNullOrEmpty(winClass))
+        {
+            var cls = WndClass(h);
+            if (cls != winClass) { Log.Info($"focusWindow: hwnd {hwndVal} 已被复用 (class={cls} != {winClass}),放弃跳转"); return; }
+        }
         if (IsIconic(h)) ShowWindow(h, SW_RESTORE);
         // ALT 按键 trick:让系统认为本进程刚收到键输入,解除 SetForegroundWindow 前台锁
         keybd_event(0x12, 0, 0, UIntPtr.Zero);

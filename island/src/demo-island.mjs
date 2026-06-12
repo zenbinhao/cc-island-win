@@ -66,7 +66,7 @@ Write-Host "OK"
 
 async function main() {
   log("=== claude-island demo ===");
-  log(`platform: ${process.platform}, SOCK: ${SOCK}`);
+  log(`platform: ${process.platform}, SOCK: ${JSON.stringify(SOCK)}`);
 
   // Step 1: kill any existing companion
   log("Step 1: clean up...");

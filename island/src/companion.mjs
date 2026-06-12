@@ -49,19 +49,16 @@ try {
 
 log("info", `companion starting (pid=${process.pid}, platform=${process.platform})`);
 
-// Kill any orphaned native host windows from a previous abnormal exit
-try {
-  execSync("taskkill /F /IM island-host-win.exe", { timeout: 3000, stdio: "pipe", windowsHide: true });
-  log("info", "cleaned up orphaned island-host-win processes");
-} catch (e) { /* no orphaned processes — expected */ }
-
 // ── User preference (~/.claude/claude-island.json) ─────────────────────
 const PREF_DIR  = join(homedir(), ".claude");
 const PREF_FILE = join(PREF_DIR, "claude-island.json");
 
+// PID 文件与孤儿 host 清理都在 server.listen 成功(确认自己是单例)之后才做:
+// 并发启动的实例若在 EADDRINUSE 判定前就 taskkill 全部 host / 抢写 PID 文件,
+// 会误杀健康 companion 的窗口、把 PID 文件指向一个将死进程
 const PID_FILE = join(PREF_DIR, "claude-island.pid");
-try { writeFileSync(PID_FILE, String(process.pid)); } catch {}
-process.on("exit", () => { try { if (existsSync(PID_FILE)) unlinkSync(PID_FILE); } catch {} });
+let ownsSingleton = false;
+process.on("exit", () => { if (ownsSingleton) { try { if (existsSync(PID_FILE)) unlinkSync(PID_FILE); } catch {} } });
 
 // ── Crash handlers ─────────────────────────────────────────────────────
 process.on("uncaughtException", (err) => {
@@ -105,6 +102,7 @@ let isCollapsed = false;
 
 const MAX_PENDING = 200;
 const pending = []; // JS strings queued before any window is ready
+const pendingCaptures = []; // captureFg sids queued before any window is ready
 
 function send(js) {
   let sentToAny = false;
@@ -117,6 +115,8 @@ function send(js) {
 function initWindow(w) {
   // Apply current state to a newly-ready window
   w.send('window.island.setTheme(' + JSON.stringify(THEME_PREF) + ')');
+  // 窗口未就绪期间排队的前台捕获:越早执行越接近回车时刻,绑错窗口概率越低
+  for (const sid of pendingCaptures.splice(0)) { try { w.cmd({ type: "captureFg", sid }); } catch {} }
   // Resize BEFORE replaying rows: native host processes resize synchronously (Form.Invoke blocks),
   // so the window is at the correct height before any upsertRow JS reaches the browser process.
   syncHeight();
@@ -144,10 +144,10 @@ function saveFgTable() {
 function hostWin() { for (const w of wins) if (w._ready) return w; return null; }
 function focusSession(id) {
   const t = hwndBySession.get(id);
-  log("info", `focus id=${id} hwnd=${t ? t.hwnd : "none"} pane=${t ? (t.paneClass || "-") + "#" + (t.paneId || "-") : "-"} tab=#${t ? (t.tabId || "-") : "-"}`);
+  log("info", `focus id=${id} hwnd=${t ? t.hwnd : "none"} class=${t ? (t.winClass || "-") : "-"} pane=${t ? (t.paneClass || "-") + "#" + (t.paneId || "-") : "-"} tab=#${t ? (t.tabId || "-") : "-"}`);
   if (!t) return;
   const hw = hostWin();
-  if (hw) hw.cmd({ type: "focusWindow", hwnd: t.hwnd, paneId: t.paneId, paneClass: t.paneClass, tabId: t.tabId || "" });
+  if (hw) hw.cmd({ type: "focusWindow", hwnd: t.hwnd, paneId: t.paneId, paneClass: t.paneClass, tabId: t.tabId || "", winClass: t.winClass || "" });
 }
 
 function openIslandWindow(screenPref) {
@@ -188,9 +188,10 @@ function openIslandWindow(screenPref) {
         paneId: typeof m.paneId === "string" ? m.paneId : "",
         paneClass: typeof m.paneClass === "string" ? m.paneClass : "",
         tabId: typeof m.tabId === "string" ? m.tabId : "",
+        winClass: typeof m.winClass === "string" ? m.winClass : "",
       });
       saveFgTable();
-      log("info", `fg captured: ${m.sid} → hwnd=${m.hwnd} pane=${(m.paneClass || "-")}#${(m.paneId || "-")} tab=#${(m.tabId || "-")}`);
+      log("info", `fg captured: ${m.sid} → hwnd=${m.hwnd} class=${m.winClass || "-"} pane=${(m.paneClass || "-")}#${(m.paneId || "-")} tab=#${(m.tabId || "-")}`);
     }
   });
   w.on("closed", () => {
@@ -203,19 +204,22 @@ function openIslandWindow(screenPref) {
   return w;
 }
 
-const firstWin = openIslandWindow(SCREEN_PREF === "all" ? "primary" : SCREEN_PREF);
-if (SCREEN_PREF === "all" && firstWin) {
-  // 先有 host 才知道屏数:经 screens 协议问到后再补开其余屏
-  firstWin.on("screens", (count) => {
-    log("info", `all-screens mode: ${count} screen(s)`);
-    for (let i = 2; i <= Math.min(count, 9); i++) openIslandWindow(String(i));
-  });
-  firstWin.on("ready", () => firstWin.cmd({ type: "screens" }));
-}
-
-if (wins.length === 0) {
-  log("fatal", "no windows could be opened");
-  process.exit(1);
+// 开窗动作整体移入 server.listen 成功回调:确认单例前不碰任何窗口/进程,
+// EADDRINUSE 的并发实例从头到尾零副作用(此前会先开一个一闪而过的 host 再退出)
+function openAllWindows() {
+  const firstWin = openIslandWindow(SCREEN_PREF === "all" ? "primary" : SCREEN_PREF);
+  if (SCREEN_PREF === "all" && firstWin) {
+    // 先有 host 才知道屏数:经 screens 协议问到后再补开其余屏
+    firstWin.on("screens", (count) => {
+      log("info", `all-screens mode: ${count} screen(s)`);
+      for (let i = 2; i <= Math.min(count, 9); i++) openIslandWindow(String(i));
+    });
+    firstWin.on("ready", () => firstWin.cmd({ type: "screens" }));
+  }
+  if (wins.length === 0) {
+    log("fatal", "no windows could be opened");
+    process.exit(1);
+  }
 }
 
 // ── Socket server ──────────────────────────────────────────────────────
@@ -224,6 +228,8 @@ try { mkdirSync(PREF_DIR, { recursive: true }); } catch (e) { log("warn", `mkdir
 const clients = new Set();
 const activeRowIds = new Set();
 const rowPids = new Map();  // id → ccPid, 用于探活
+const rowSeenAlive = new Set();   // 曾观测到 pid 存活的行(探活可信)
+const rowLastUpdate = new Map();  // id → 最近 update 时间戳(pid 不可信时的静默期兜底)
 
 let lastW = -1, lastH = -1;
 function syncHeight() {
@@ -236,6 +242,8 @@ function syncHeight() {
 function removeRowById(id) {
   activeRowIds.delete(id);
   rowPids.delete(id);
+  rowSeenAlive.delete(id);
+  rowLastUpdate.delete(id);
   if (hwndBySession.delete(id)) saveFgTable();
   currentRows.delete(id);
   syncHeight();  // 空了会自动隐藏(在 syncHeight 里统一处理)
@@ -256,6 +264,7 @@ const server = createServer((sock) => {
       if (!msg.id || !VALID_STATUS.has(msg.status)) return;
       log("info", `update id=${msg.id} status=${msg.status} project=${msg.project||''} prompt="${(msg.prompt||'').substring(0,40)}"`);
       activeRowIds.add(msg.id);
+      rowLastUpdate.set(msg.id, Date.now());
       if (typeof msg.ccPid === "number" && msg.ccPid > 0) {
         rowPids.set(msg.id, msg.ccPid);
       }
@@ -263,6 +272,7 @@ const server = createServer((sock) => {
         // UserPromptSubmit 时刻:用户刚在该终端按下回车,前台窗口就是它
         const hw = hostWin();
         if (hw) hw.cmd({ type: "captureFg", sid: msg.id });
+        else if (pendingCaptures.length < 20) pendingCaptures.push(msg.id); // 冷启动首条 prompt:窗口就绪后立刻补捕获
       }
       // Auto-expand when new update arrives
       if (isCollapsed) {
@@ -326,12 +336,22 @@ server.on("error", (err) => {
 });
 
 server.listen(SOCK, () => {
-  log("info", `listening on ${SOCK}`);
+  log("info", `listening on ${JSON.stringify(SOCK)}`);
+  ownsSingleton = true;
+  try { writeFileSync(PID_FILE, String(process.pid)); } catch {}
+  // 单例确认、自己尚未开窗的此刻,才清理上次异常退出留下的孤儿 host
+  try {
+    execSync("taskkill /F /IM island-host-win.exe", { timeout: 3000, stdio: "pipe", windowsHide: true });
+    log("info", "cleaned up orphaned island-host-win processes");
+  } catch { /* 没有孤儿进程 — 正常 */ }
+  openAllWindows();
 });
 
 // ── Liveness checker (30s) ─────────────────────────────────────────────
 setInterval(() => {
-  const dead = deadRowIds(rowPids, processIsAlive);
+  const dead = deadRowIds(rowPids, processIsAlive, {
+    seenAlive: rowSeenAlive, lastUpdate: rowLastUpdate,
+  });
   for (const id of dead) {
     log("info", `liveness check: row ${id} pid=${rowPids.get(id)} is dead, removing`);
     removeRowById(id);
